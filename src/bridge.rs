@@ -118,18 +118,33 @@ impl UartToMoon {
     ) -> Result<()> {
         let (reader, mut writer) = stream.split();
         let mut buf_reader = BufReader::new(reader);
-        let mut line = String::new();
+        let mut buffer = Vec::new();
         let mut protocol_handler = ProtocolHandler::new();
 
         loop {
-            line.clear();
-            match buf_reader.read_line(&mut line).await {
+            buffer.clear();
+
+            // Read until we find the ASCII 0x03 (ETX) terminator
+            match buf_reader.read_until(0x03, &mut buffer).await {
                 Ok(0) => {
                     info!("Client disconnected");
                     break;
                 }
                 Ok(_) => {
-                    let trimmed = line.trim();
+                    // Remove the 0x03 terminator and convert to string
+                    if buffer.last() == Some(&0x03) {
+                        buffer.pop();
+                    }
+
+                    let message_str = match String::from_utf8(buffer.clone()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!("Failed to parse message as UTF-8: {e}");
+                            continue;
+                        }
+                    };
+
+                    let trimmed = message_str.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
@@ -148,12 +163,12 @@ impl UartToMoon {
                                         }
                                     }
 
-                                    // Send response back to client
+                                    // Send response back to client with ASCII 0x03 terminator
                                     let response_json = serde_json::to_string(&response)?;
-                                    if let Err(e) = writer
-                                        .write_all(format!("{response_json}\n").as_bytes())
-                                        .await
-                                    {
+                                    let mut response_bytes = response_json.into_bytes();
+                                    response_bytes.push(0x03); // Add ASCII 0x03 terminator
+
+                                    if let Err(e) = writer.write_all(&response_bytes).await {
                                         error!("Failed to write to client: {e}");
                                         break;
                                     }

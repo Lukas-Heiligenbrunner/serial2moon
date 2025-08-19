@@ -75,7 +75,7 @@ impl ProtocolHandler {
         log::info!("Handling Klipper message: {message:?}");
 
         match message.method.as_str() {
-            "info" => {
+            "info" | "printer.info" => {
                 let result = serde_json::json!({
                     "state": "ready",
                     "state_message": "Printer is ready",
@@ -378,6 +378,27 @@ mod tests {
         assert!(response.result.is_some());
         assert!(response.error.is_none());
         assert!(gcode.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_printer_info_message() {
+        let mut handler = ProtocolHandler::new();
+        let message = KlipperMessage {
+            id: Some(7),
+            method: "printer.info".to_string(),
+            params: None,
+        };
+
+        let (response, gcode) = handler.handle_message(message).await.unwrap();
+
+        assert_eq!(response.id, Some(7));
+        assert!(response.result.is_some());
+        assert!(response.error.is_none());
+        assert!(gcode.is_none());
+
+        let result = response.result.unwrap();
+        assert_eq!(result["state"], "ready");
+        assert_eq!(result["hostname"], "uart2moon");
     }
 
     #[test]
