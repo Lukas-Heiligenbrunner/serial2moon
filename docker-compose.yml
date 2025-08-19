@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  uart2moon:
+    build: .
+    container_name: uart2moon
+    environment:
+      - TEST_MODE=true
+      - SOCKET_PATH=/tmp/printer
+      - VERBOSE=true
+    volumes:
+      - printer_socket:/tmp
+    networks:
+      - printer_network
+    restart: unless-stopped
+
+  moonraker:
+    image: mkuf/moonraker:latest
+    container_name: moonraker
+    volumes:
+      - ./config/moonraker.conf:/opt/moonraker/config/moonraker.conf
+      - printer_socket:/tmp
+      - moonraker_data:/opt/moonraker/data
+      - moonraker_logs:/opt/moonraker/logs
+    ports:
+      - "7125:7125"
+    networks:
+      - printer_network
+    depends_on:
+      - uart2moon
+    restart: unless-stopped
+
+  mainsail:
+    image: ghcr.io/mainsail-crew/mainsail:latest
+    container_name: mainsail
+    ports:
+      - "8080:80"
+    environment:
+      - MOONRAKER_HOST=moonraker
+      - MOONRAKER_PORT=7125
+    networks:
+      - printer_network
+    depends_on:
+      - moonraker
+    restart: unless-stopped
+
+volumes:
+  printer_socket:
+  moonraker_data:
+  moonraker_logs:
+
+networks:
+  printer_network:
+    driver: bridge

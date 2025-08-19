@@ -1,10 +1,9 @@
 use anyhow::{Context, Result};
 use log::{error, info, warn};
-use serde_json;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_serial::SerialPortBuilderExt;
 
 use crate::protocol::{KlipperMessage, ProtocolHandler};
@@ -17,7 +16,12 @@ pub struct UartToMoon {
 }
 
 impl UartToMoon {
-    pub fn new(socket_path: std::path::PathBuf, device: String, baud_rate: u32, test_mode: bool) -> Self {
+    pub fn new(
+        socket_path: std::path::PathBuf,
+        device: String,
+        baud_rate: u32,
+        test_mode: bool,
+    ) -> Self {
         Self {
             socket_path,
             device,
@@ -41,7 +45,8 @@ impl UartToMoon {
 
         // Create the parent directory if it doesn't exist
         if let Some(parent) = self.socket_path.parent() {
-            tokio::fs::create_dir_all(parent).await
+            tokio::fs::create_dir_all(parent)
+                .await
                 .context("Failed to create socket directory")?;
         }
 
@@ -52,23 +57,28 @@ impl UartToMoon {
         if self.test_mode {
             info!("Running in test mode - no serial connection");
             // Start a mock serial handler for test mode
-            let _serial_handle = tokio::spawn(Self::handle_test_serial(to_serial_rx, from_serial_tx));
+            let _serial_handle =
+                tokio::spawn(Self::handle_test_serial(to_serial_rx, from_serial_tx));
         } else {
             // Setup real serial connection
             let serial_port = tokio_serial::new(&self.device, self.baud_rate)
                 .open_native_async()
                 .context("Failed to open serial port")?;
-                
+
             let serial_port = Arc::new(Mutex::new(serial_port));
-            
+
             // Start serial handler
-            let _serial_handle = tokio::spawn(Self::handle_serial(serial_port, to_serial_rx, from_serial_tx));
+            let _serial_handle = tokio::spawn(Self::handle_serial(
+                serial_port,
+                to_serial_rx,
+                from_serial_tx,
+            ));
         }
 
         // Start Unix socket server
-        let listener = UnixListener::bind(&self.socket_path)
-            .context("Failed to bind Unix socket")?;
-        
+        let listener =
+            UnixListener::bind(&self.socket_path).context("Failed to bind Unix socket")?;
+
         info!("Unix socket server listening at {:?}", self.socket_path);
 
         loop {
@@ -86,7 +96,7 @@ impl UartToMoon {
                         }
                     }
                 }
-                
+
                 // Handle responses from serial port
                 serial_response = from_serial_rx.recv() => {
                     if let Some(response) = serial_response {
@@ -98,7 +108,10 @@ impl UartToMoon {
         }
     }
 
-    async fn handle_client(mut stream: UnixStream, to_serial_tx: mpsc::Sender<String>) -> Result<()> {
+    async fn handle_client(
+        mut stream: UnixStream,
+        to_serial_tx: mpsc::Sender<String>,
+    ) -> Result<()> {
         let (reader, mut writer) = stream.split();
         let mut buf_reader = BufReader::new(reader);
         let mut line = String::new();
@@ -133,7 +146,10 @@ impl UartToMoon {
 
                                     // Send response back to client
                                     let response_json = serde_json::to_string(&response)?;
-                                    if let Err(e) = writer.write_all(format!("{}\n", response_json).as_bytes()).await {
+                                    if let Err(e) = writer
+                                        .write_all(format!("{}\n", response_json).as_bytes())
+                                        .await
+                                    {
                                         error!("Failed to write to client: {}", e);
                                         break;
                                     }
@@ -177,7 +193,7 @@ impl UartToMoon {
                     let mut serial_guard = serial_reader.lock().await;
                     let mut buf_reader = BufReader::new(&mut *serial_guard);
                     line.clear();
-                    
+
                     match buf_reader.read_line(&mut line).await {
                         Ok(0) => {
                             warn!("Serial port closed");
@@ -209,7 +225,7 @@ impl UartToMoon {
             } else {
                 format!("{}\n", cmd)
             };
-            
+
             let mut serial_guard = serial.lock().await;
             if let Err(e) = serial_guard.write_all(cmd_with_newline.as_bytes()).await {
                 error!("Failed to write to serial port: {}", e);
@@ -225,34 +241,37 @@ impl UartToMoon {
         from_serial_tx: mpsc::Sender<String>,
     ) -> Result<()> {
         info!("Test serial handler started");
-        
+
         while let Some(cmd) = to_serial_rx.recv().await {
             info!("TEST: Would send to printer: {}", cmd.trim());
-            
+
             // Simulate printer response
             let response = match cmd.trim() {
-                cmd if cmd.starts_with("M115") => "FIRMWARE_NAME:uart2moon FIRMWARE_VERSION:0.1.0\nok",
-                cmd if cmd.starts_with("M105") => "ok T:25.0 /0.0 B:25.0 /0.0 T0:25.0 /0.0 @:0 B@:0",
+                cmd if cmd.starts_with("M115") => {
+                    "FIRMWARE_NAME:uart2moon FIRMWARE_VERSION:0.1.0\nok"
+                }
+                cmd if cmd.starts_with("M105") => {
+                    "ok T:25.0 /0.0 B:25.0 /0.0 T0:25.0 /0.0 @:0 B@:0"
+                }
                 cmd if cmd.starts_with("G28") => "ok",
                 cmd if cmd.starts_with("M112") => "!! Emergency stop activated",
                 _ => "ok",
             };
-            
+
             if let Err(e) = from_serial_tx.send(format!("{}\n", response)).await {
                 error!("Failed to send test response: {}", e);
             }
         }
-        
+
         Ok(())
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     #[test]
     fn test_uart_to_moon_new() {
@@ -370,8 +389,13 @@ mod tests {
     fn test_socket_path_creation() {
         let temp_dir = TempDir::new().unwrap();
         let socket_path = temp_dir.path().join("test_socket");
-        
-        let bridge = UartToMoon::new(socket_path.clone(), "/dev/ttyUSB0".to_string(), 115200, true);
+
+        let bridge = UartToMoon::new(
+            socket_path.clone(),
+            "/dev/ttyUSB0".to_string(),
+            115200,
+            true,
+        );
         assert_eq!(bridge.socket_path, socket_path);
     }
 }
