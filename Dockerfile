@@ -17,9 +17,9 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 
 # Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+#RUN apt-get update && apt-get install -y \
+#    ca-certificates \
+#    && rm -rf /var/lib/apt/lists/*
 
 # Create app user
 RUN useradd -m -u 1001 app

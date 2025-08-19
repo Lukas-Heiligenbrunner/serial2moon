@@ -1,8 +1,8 @@
+use anyhow::{Context, Result};
+use log::{error, info, warn};
 use std::fs;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
-use anyhow::{Context, Result};
-use log::{error, info, warn};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -82,7 +82,7 @@ impl UartToMoon {
         let listener =
             UnixListener::bind(&self.socket_path).context("Failed to bind Unix socket")?;
         fs::set_permissions(&self.socket_path, Permissions::from_mode(0o777))?;
-        
+
         info!("Unix socket server listening at {:?}", self.socket_path);
 
         loop {
@@ -96,7 +96,7 @@ impl UartToMoon {
                             tokio::spawn(Self::handle_client(stream, to_serial_tx));
                         }
                         Err(e) => {
-                            error!("Failed to accept connection: {}", e);
+                            error!("Failed to accept connection: {e}");
                         }
                     }
                 }
@@ -134,7 +134,7 @@ impl UartToMoon {
                         continue;
                     }
 
-                    info!("Received from client: {}", trimmed);
+                    info!("Received from client: {trimmed}");
 
                     // Parse Klipper message
                     match serde_json::from_str::<KlipperMessage>(trimmed) {
@@ -144,42 +144,42 @@ impl UartToMoon {
                                     // Send G-code to printer if needed
                                     if let Some(gcode) = gcode_opt {
                                         if let Err(e) = to_serial_tx.send(gcode).await {
-                                            error!("Failed to send to serial: {}", e);
+                                            error!("Failed to send to serial: {e}");
                                         }
                                     }
 
                                     // Send response back to client
                                     let response_json = serde_json::to_string(&response)?;
                                     if let Err(e) = writer
-                                        .write_all(format!("{}\n", response_json).as_bytes())
+                                        .write_all(format!("{response_json}\n").as_bytes())
                                         .await
                                     {
-                                        error!("Failed to write to client: {}", e);
+                                        error!("Failed to write to client: {e}");
                                         break;
                                     }
-                                    
+
                                     // Ensure data is flushed
                                     if let Err(e) = writer.flush().await {
-                                        error!("Failed to flush client response: {}", e);
+                                        error!("Failed to flush client response: {e}");
                                         break;
                                     }
                                 }
                                 Err(e) => {
-                                    error!("Protocol handler error: {}", e);
+                                    error!("Protocol handler error: {e}");
                                 }
                             }
                         }
                         Err(e) => {
-                            warn!("Failed to parse message as JSON: {} - Raw: {}", e, trimmed);
+                            warn!("Failed to parse message as JSON: {e} - Raw: {trimmed}");
                             // Try to handle as raw G-code
                             if let Err(e) = to_serial_tx.send(trimmed.to_string()).await {
-                                error!("Failed to send raw command to serial: {}", e);
+                                error!("Failed to send raw command to serial: {e}");
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    error!("Failed to read from client: {}", e);
+                    error!("Failed to read from client: {e}");
                     break;
                 }
             }
@@ -212,12 +212,12 @@ impl UartToMoon {
                         Ok(_) => {
                             if !line.trim().is_empty() {
                                 if let Err(e) = from_serial_tx_clone.send(line.clone()).await {
-                                    error!("Failed to forward serial response: {}", e);
+                                    error!("Failed to forward serial response: {e}");
                                 }
                             }
                         }
                         Err(e) => {
-                            error!("Failed to read from serial port: {}", e);
+                            error!("Failed to read from serial port: {e}");
                             break;
                         }
                     }
@@ -233,12 +233,12 @@ impl UartToMoon {
             let cmd_with_newline = if cmd.ends_with('\n') {
                 cmd
             } else {
-                format!("{}\n", cmd)
+                format!("{cmd}\n")
             };
 
             let mut serial_guard = serial.lock().await;
             if let Err(e) = serial_guard.write_all(cmd_with_newline.as_bytes()).await {
-                error!("Failed to write to serial port: {}", e);
+                error!("Failed to write to serial port: {e}");
             }
         }
 
@@ -268,8 +268,8 @@ impl UartToMoon {
                 _ => "ok",
             };
 
-            if let Err(e) = from_serial_tx.send(format!("{}\n", response)).await {
-                error!("Failed to send test response: {}", e);
+            if let Err(e) = from_serial_tx.send(format!("{response}\n")).await {
+                error!("Failed to send test response: {e}");
             }
         }
 

@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
             info!("Bridge exited successfully");
         }
         Err(e) => {
-            error!("Bridge failed: {}", e);
+            error!("Bridge failed: {e}");
             return Err(e);
         }
     }
