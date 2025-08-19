@@ -81,8 +81,14 @@ impl ProtocolHandler {
                     "state_message": "Printer is ready",
                     "hostname": "uart2moon",
                     "software_version": "uart2moon-0.1.0",
-                    "cpu_info": "uart2moon",
-                    "python_path": "/usr/bin/python3"
+                    "cpu_info": "uart2moon bridge",
+                    "python_path": "/usr/bin/python3",
+                    "log_file": "/tmp/klippy.log",
+                    "config_file": "/tmp/printer.cfg",
+                    "version": "v0.12.0-uart2moon",
+                    "build_version": "uart2moon-0.1.0",
+                    "cpu": "arm64",
+                    "cpu_desc": "Emulated uart2moon CPU"
                 });
                 Ok((KlipperResponse::success(message.id, result), None))
             }
@@ -93,8 +99,53 @@ impl ProtocolHandler {
                 Ok((KlipperResponse::success(message.id, result), None))
             }
             "objects/query" => {
-                // Return current printer status
-                let result = serde_json::json!(self.printer_status);
+                // Return current printer status with more comprehensive data
+                let mut status = self.printer_status.clone();
+                
+                // Add additional status fields that Moonraker expects
+                status.insert("gcode_move".to_string(), serde_json::json!({
+                    "position": [0.0, 0.0, 0.0, 0.0],
+                    "homing_origin": [0.0, 0.0, 0.0, 0.0],
+                    "gcode_position": [0.0, 0.0, 0.0, 0.0],
+                    "absolute_coordinates": true,
+                    "absolute_extrude": true,
+                    "extrude_factor": 1.0,
+                    "speed_factor": 1.0
+                }));
+                
+                status.insert("toolhead".to_string(), serde_json::json!({
+                    "position": [0.0, 0.0, 0.0, 0.0],
+                    "homed_axes": "xyz",
+                    "print_time": 0.0,
+                    "estimated_print_time": 0.0,
+                    "max_velocity": 300.0,
+                    "max_accel": 3000.0,
+                    "axis_minimum": [0.0, 0.0, 0.0],
+                    "axis_maximum": [220.0, 220.0, 250.0]
+                }));
+                
+                status.insert("extruder".to_string(), serde_json::json!({
+                    "temperature": 25.0,
+                    "target": 0.0,
+                    "pressure_advance": 0.0,
+                    "smooth_time": 0.040
+                }));
+                
+                status.insert("heater_bed".to_string(), serde_json::json!({
+                    "temperature": 25.0,
+                    "target": 0.0
+                }));
+                
+                status.insert("print_stats".to_string(), serde_json::json!({
+                    "filename": "",
+                    "total_duration": 0.0,
+                    "print_duration": 0.0,
+                    "filament_used": 0.0,
+                    "state": "standby",
+                    "message": ""
+                }));
+                
+                let result = serde_json::json!(status);
                 Ok((KlipperResponse::success(message.id, result), None))
             }
             "gcode/script" => {
@@ -126,6 +177,30 @@ impl ProtocolHandler {
                     KlipperResponse::success(message.id, result),
                     Some("M112".to_string()),
                 ))
+            }
+            "get_status" => {
+                // Similar to objects/query but for specific objects
+                let result = serde_json::json!({
+                    "gcode_move": {
+                        "position": [0.0, 0.0, 0.0, 0.0],
+                        "homing_origin": [0.0, 0.0, 0.0, 0.0]
+                    },
+                    "toolhead": {
+                        "position": [0.0, 0.0, 0.0, 0.0],
+                        "homed_axes": "xyz"
+                    }
+                });
+                Ok((KlipperResponse::success(message.id, result), None))
+            }
+            "register_remote_method" => {
+                // Moonraker registers methods with Klipper
+                let result = serde_json::json!({});
+                Ok((KlipperResponse::success(message.id, result), None))
+            }
+            "objects/subscribe" => {
+                // Moonraker subscribes to object updates
+                let result = serde_json::json!({});
+                Ok((KlipperResponse::success(message.id, result), None))
             }
             _ => {
                 log::warn!("Unhandled method: {}", message.method);

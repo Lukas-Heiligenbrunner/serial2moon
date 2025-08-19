@@ -157,6 +157,12 @@ impl UartToMoon {
                                         error!("Failed to write to client: {}", e);
                                         break;
                                     }
+                                    
+                                    // Ensure data is flushed
+                                    if let Err(e) = writer.flush().await {
+                                        error!("Failed to flush client response: {}", e);
+                                        break;
+                                    }
                                 }
                                 Err(e) => {
                                     error!("Protocol handler error: {}", e);
