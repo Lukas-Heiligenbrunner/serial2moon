@@ -3,7 +3,7 @@ use log::{error, info, warn};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio_serial::SerialPortBuilderExt;
 
 use crate::protocol::{KlipperMessage, ProtocolHandler};
@@ -271,7 +271,7 @@ impl UartToMoon {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{timeout, Duration};
 
     #[test]
     fn test_uart_to_moon_new() {

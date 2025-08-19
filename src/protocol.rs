@@ -136,6 +136,7 @@ impl ProtocolHandler {
     }
 
     /// Process G-code response from printer and update status
+    #[allow(dead_code)]
     pub fn process_printer_response(&mut self, response: &str) {
         log::debug!("Processing printer response: {}", response.trim());
 

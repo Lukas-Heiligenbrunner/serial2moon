@@ -7,3 +7,4 @@ Dockerfile
 .dockerignore
 .env
 .env.example
+test-env.sh

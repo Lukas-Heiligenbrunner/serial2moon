@@ -115,16 +115,21 @@ A complete development environment with Moonraker and Mainsail is available usin
 
 ### Quick Start
 
-1. Start the development environment:
+1. Validate your setup (optional):
+   ```bash
+   ./test-env.sh
+   ```
+
+2. Start the development environment:
    ```bash
    docker-compose up -d
    ```
 
-2. Access the interfaces:
+3. Access the interfaces:
    - **Mainsail Web Interface**: http://localhost:8080
    - **Moonraker API**: http://localhost:7125
 
-3. Stop the environment:
+4. Stop the environment:
    ```bash
    docker-compose down
    ```
