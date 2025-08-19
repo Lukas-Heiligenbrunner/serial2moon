@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   uart2moon:
-    build: .
+    build:
+      context: .
+      no_cache: true
     container_name: uart2moon
     environment:
       - TEST_MODE=true
@@ -15,10 +17,10 @@ services:
     restart: unless-stopped
 
   moonraker:
-    image: mkuf/moonraker:latest
+    image: registry.hub.docker.com/mkuf/moonraker:latest
     container_name: moonraker
     volumes:
-      - ./config/moonraker.conf:/opt/moonraker/config/moonraker.conf
+      - ./config/moonraker.conf:/opt/printer_data/config/moonraker.conf
       - printer_socket:/tmp
       - moonraker_data:/opt/moonraker/data
       - moonraker_logs:/opt/moonraker/logs

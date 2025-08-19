@@ -1,3 +1,6 @@
+use std::fs;
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 use anyhow::{Context, Result};
 use log::{error, info, warn};
 use std::sync::Arc;
@@ -78,7 +81,8 @@ impl UartToMoon {
         // Start Unix socket server
         let listener =
             UnixListener::bind(&self.socket_path).context("Failed to bind Unix socket")?;
-
+        fs::set_permissions(&self.socket_path, Permissions::from_mode(0o777))?;
+        
         info!("Unix socket server listening at {:?}", self.socket_path);
 
         loop {
