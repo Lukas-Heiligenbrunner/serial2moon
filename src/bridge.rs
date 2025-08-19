@@ -123,6 +123,7 @@ impl UartToMoon {
 
         loop {
             buffer.clear();
+            info!("Reading from serial stream");
 
             // Read until we find the ASCII 0x03 (ETX) terminator
             match buf_reader.read_until(0x03, &mut buffer).await {
@@ -131,6 +132,7 @@ impl UartToMoon {
                     break;
                 }
                 Ok(_) => {
+                    info!("Client connected");
                     // Remove the 0x03 terminator and convert to string
                     if buffer.last() == Some(&0x03) {
                         buffer.pop();
@@ -157,6 +159,7 @@ impl UartToMoon {
                             match protocol_handler.handle_message(message).await {
                                 Ok((response, gcode_opt)) => {
                                     // Send G-code to printer if needed
+                                    info!("Received response: {response:?}");
                                     if let Some(gcode) = gcode_opt {
                                         if let Err(e) = to_serial_tx.send(gcode).await {
                                             error!("Failed to send to serial: {e}");

@@ -75,7 +75,7 @@ impl ProtocolHandler {
         log::info!("Handling Klipper message: {message:?}");
 
         match message.method.as_str() {
-            "info" | "printer.info" => {
+            "info" | "printer.info" | "printer/info" => {
                 let result = serde_json::json!({
                     "state": "ready",
                     "state_message": "Printer is ready",
