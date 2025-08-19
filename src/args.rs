@@ -19,4 +19,8 @@ pub struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     pub verbose: bool,
+    
+    /// Test mode - run without connecting to serial device
+    #[arg(short, long)]
+    pub test_mode: bool,
 }

@@ -13,14 +13,16 @@ pub struct UartToMoon {
     socket_path: std::path::PathBuf,
     device: String,
     baud_rate: u32,
+    test_mode: bool,
 }
 
 impl UartToMoon {
-    pub fn new(socket_path: std::path::PathBuf, device: String, baud_rate: u32) -> Self {
+    pub fn new(socket_path: std::path::PathBuf, device: String, baud_rate: u32, test_mode: bool) -> Self {
         Self {
             socket_path,
             device,
             baud_rate,
+            test_mode,
         }
     }
 
@@ -29,6 +31,7 @@ impl UartToMoon {
         info!("Socket path: {:?}", self.socket_path);
         info!("Device: {}", self.device);
         info!("Baud rate: {}", self.baud_rate);
+        info!("Test mode: {}", self.test_mode);
 
         // Remove existing socket file if it exists
         if self.socket_path.exists() {
@@ -42,19 +45,25 @@ impl UartToMoon {
                 .context("Failed to create socket directory")?;
         }
 
-        // Setup serial connection
-        let serial_port = tokio_serial::new(&self.device, self.baud_rate)
-            .open_native_async()
-            .context("Failed to open serial port")?;
-            
-        let serial_port = Arc::new(Mutex::new(serial_port));
-
-        // Create channels for communication between socket and serial handlers
+        // Setup serial connection or test mode
         let (to_serial_tx, to_serial_rx) = mpsc::channel::<String>(100);
         let (from_serial_tx, mut from_serial_rx) = mpsc::channel::<String>(100);
 
-        // Start serial handler
-        let _serial_handle = tokio::spawn(Self::handle_serial(serial_port, to_serial_rx, from_serial_tx));
+        if self.test_mode {
+            info!("Running in test mode - no serial connection");
+            // Start a mock serial handler for test mode
+            let _serial_handle = tokio::spawn(Self::handle_test_serial(to_serial_rx, from_serial_tx));
+        } else {
+            // Setup real serial connection
+            let serial_port = tokio_serial::new(&self.device, self.baud_rate)
+                .open_native_async()
+                .context("Failed to open serial port")?;
+                
+            let serial_port = Arc::new(Mutex::new(serial_port));
+            
+            // Start serial handler
+            let _serial_handle = tokio::spawn(Self::handle_serial(serial_port, to_serial_rx, from_serial_tx));
+        }
 
         // Start Unix socket server
         let listener = UnixListener::bind(&self.socket_path)
@@ -208,6 +217,32 @@ impl UartToMoon {
         }
 
         read_task.abort();
+        Ok(())
+    }
+
+    async fn handle_test_serial(
+        mut to_serial_rx: mpsc::Receiver<String>,
+        from_serial_tx: mpsc::Sender<String>,
+    ) -> Result<()> {
+        info!("Test serial handler started");
+        
+        while let Some(cmd) = to_serial_rx.recv().await {
+            info!("TEST: Would send to printer: {}", cmd.trim());
+            
+            // Simulate printer response
+            let response = match cmd.trim() {
+                cmd if cmd.starts_with("M115") => "FIRMWARE_NAME:uart2moon FIRMWARE_VERSION:0.1.0\nok",
+                cmd if cmd.starts_with("M105") => "ok T:25.0 /0.0 B:25.0 /0.0 T0:25.0 /0.0 @:0 B@:0",
+                cmd if cmd.starts_with("G28") => "ok",
+                cmd if cmd.starts_with("M112") => "!! Emergency stop activated",
+                _ => "ok",
+            };
+            
+            if let Err(e) = from_serial_tx.send(format!("{}\n", response)).await {
+                error!("Failed to send test response: {}", e);
+            }
+        }
+        
         Ok(())
     }
 

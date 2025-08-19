@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     info!("Baud rate: {}", args.baud_rate);
 
     // Create and run the bridge
-    let bridge = UartToMoon::new(args.socket_path, args.device, args.baud_rate);
+    let bridge = UartToMoon::new(args.socket_path, args.device, args.baud_rate, args.test_mode);
     
     match bridge.run().await {
         Ok(_) => {
