@@ -3,30 +3,33 @@ mod bridge;
 mod protocol;
 
 use anyhow::Result;
-use clap::Parser;
 use log::{info, error};
 
-use args::Args;
+use args::Config;
 use bridge::UartToMoon;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    // Load .env file if it exists
+    dotenvy::dotenv().ok();
+    
+    let config = Config::from_env();
     
     // Initialize logger
-    if args.verbose {
+    if config.verbose {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
     } else {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
 
     info!("Starting Uart2Moon bridge");
-    info!("Socket path: {:?}", args.socket_path);
-    info!("Device: {}", args.device);
-    info!("Baud rate: {}", args.baud_rate);
+    info!("Socket path: {:?}", config.socket_path);
+    info!("Device: {}", config.device);
+    info!("Baud rate: {}", config.baud_rate);
+    info!("Test mode: {}", config.test_mode);
 
     // Create and run the bridge
-    let bridge = UartToMoon::new(args.socket_path, args.device, args.baud_rate, args.test_mode);
+    let bridge = UartToMoon::new(config.socket_path, config.device, config.baud_rate, config.test_mode);
     
     match bridge.run().await {
         Ok(_) => {

@@ -247,3 +247,131 @@ impl UartToMoon {
     }
 
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use tokio::time::{timeout, Duration};
+
+    #[test]
+    fn test_uart_to_moon_new() {
+        let socket_path = std::path::PathBuf::from("/tmp/test_socket");
+        let device = "/dev/ttyUSB0".to_string();
+        let baud_rate = 115200;
+        let test_mode = true;
+
+        let bridge = UartToMoon::new(socket_path.clone(), device.clone(), baud_rate, test_mode);
+
+        assert_eq!(bridge.socket_path, socket_path);
+        assert_eq!(bridge.device, device);
+        assert_eq!(bridge.baud_rate, baud_rate);
+        assert_eq!(bridge.test_mode, test_mode);
+    }
+
+    #[tokio::test]
+    async fn test_handle_test_serial() {
+        let (to_serial_tx, to_serial_rx) = mpsc::channel::<String>(10);
+        let (from_serial_tx, mut from_serial_rx) = mpsc::channel::<String>(10);
+
+        // Start the test serial handler
+        let handle = tokio::spawn(UartToMoon::handle_test_serial(to_serial_rx, from_serial_tx));
+
+        // Send a test command
+        to_serial_tx.send("M115".to_string()).await.unwrap();
+
+        // Check we get a response
+        let response = timeout(Duration::from_millis(100), from_serial_rx.recv())
+            .await
+            .expect("Should receive response within timeout")
+            .expect("Should receive a response");
+
+        assert!(response.contains("FIRMWARE_NAME:uart2moon"));
+
+        // Send temperature request
+        to_serial_tx.send("M105".to_string()).await.unwrap();
+        let response = timeout(Duration::from_millis(100), from_serial_rx.recv())
+            .await
+            .expect("Should receive response within timeout")
+            .expect("Should receive a response");
+
+        assert!(response.contains("T:25.0"));
+
+        // Clean up
+        drop(to_serial_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_test_serial_home_command() {
+        let (to_serial_tx, to_serial_rx) = mpsc::channel::<String>(10);
+        let (from_serial_tx, mut from_serial_rx) = mpsc::channel::<String>(10);
+
+        let handle = tokio::spawn(UartToMoon::handle_test_serial(to_serial_rx, from_serial_tx));
+
+        // Send home command
+        to_serial_tx.send("G28".to_string()).await.unwrap();
+        let response = timeout(Duration::from_millis(100), from_serial_rx.recv())
+            .await
+            .expect("Should receive response within timeout")
+            .expect("Should receive a response");
+
+        assert!(response.contains("ok"));
+
+        // Clean up
+        drop(to_serial_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_test_serial_emergency_stop() {
+        let (to_serial_tx, to_serial_rx) = mpsc::channel::<String>(10);
+        let (from_serial_tx, mut from_serial_rx) = mpsc::channel::<String>(10);
+
+        let handle = tokio::spawn(UartToMoon::handle_test_serial(to_serial_rx, from_serial_tx));
+
+        // Send emergency stop
+        to_serial_tx.send("M112".to_string()).await.unwrap();
+        let response = timeout(Duration::from_millis(100), from_serial_rx.recv())
+            .await
+            .expect("Should receive response within timeout")
+            .expect("Should receive a response");
+
+        assert!(response.contains("Emergency stop"));
+
+        // Clean up
+        drop(to_serial_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_test_serial_unknown_command() {
+        let (to_serial_tx, to_serial_rx) = mpsc::channel::<String>(10);
+        let (from_serial_tx, mut from_serial_rx) = mpsc::channel::<String>(10);
+
+        let handle = tokio::spawn(UartToMoon::handle_test_serial(to_serial_rx, from_serial_tx));
+
+        // Send unknown command
+        to_serial_tx.send("UNKNOWN".to_string()).await.unwrap();
+        let response = timeout(Duration::from_millis(100), from_serial_rx.recv())
+            .await
+            .expect("Should receive response within timeout")
+            .expect("Should receive a response");
+
+        assert!(response.contains("ok"));
+
+        // Clean up
+        drop(to_serial_tx);
+        let _ = handle.await;
+    }
+
+    // Integration test for socket creation (only test setup, not full run to avoid hanging)
+    #[test]
+    fn test_socket_path_creation() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("test_socket");
+        
+        let bridge = UartToMoon::new(socket_path.clone(), "/dev/ttyUSB0".to_string(), 115200, true);
+        assert_eq!(bridge.socket_path, socket_path);
+    }
+}
