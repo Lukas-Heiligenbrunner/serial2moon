@@ -1,0 +1,13 @@
+[package]
+name = "Uart2Moon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.39", features = ["full"] }
+tokio-serial = "5.4"
+log = "0.4.27"
+hyper = "1.7.0"
