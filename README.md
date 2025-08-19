@@ -109,6 +109,67 @@ echo '{"id": 2, "method": "gcode/script", "params": {"script": "G28"}}' | nc -U 
 - tokio runtime for async I/O
 - Access to serial device (typically requires being in `dialout` group on Linux)
 
+## Development Environment
+
+A complete development environment with Moonraker and Mainsail is available using Docker Compose. This setup runs uart2moon in test mode (no real serial device required) and provides a full web interface for testing.
+
+### Quick Start
+
+1. Validate your setup (optional):
+   ```bash
+   ./test-env.sh
+   ```
+
+2. Start the development environment:
+   ```bash
+   docker-compose up -d
+   ```
+
+3. Access the interfaces:
+   - **Mainsail Web Interface**: http://localhost:8080
+   - **Moonraker API**: http://localhost:7125
+
+4. Stop the environment:
+   ```bash
+   docker-compose down
+   ```
+
+### What's Included
+
+- **uart2moon**: Runs in test mode, creating a mock printer interface
+- **Moonraker**: Provides the JSON-RPC API that Mainsail uses
+- **Mainsail**: Modern web interface for printer control
+
+### Testing the Setup
+
+You can test the connection by sending commands through Mainsail or directly to the Moonraker API:
+
+```bash
+# Test via Moonraker API
+curl -X POST http://localhost:7125/printer/gcode/script \
+     -H "Content-Type: application/json" \
+     -d '{"script": "G28"}'
+
+# Check printer status
+curl http://localhost:7125/printer/info
+```
+
+### Development Workflow
+
+1. Make changes to the Rust code
+2. Rebuild the container:
+   ```bash
+   docker-compose build uart2moon
+   docker-compose up -d
+   ```
+3. Test changes through the Mainsail interface
+
+### Troubleshooting
+
+- **Mainsail shows "Printer not connected"**: Wait a few seconds for uart2moon to start and create the socket
+- **Port conflicts**: Modify the ports in `docker-compose.yml` if 8080 or 7125 are already in use
+- **Build failures**: Ensure you have Docker and Docker Compose installed
+
 ## License
 
 [Add your license information here]

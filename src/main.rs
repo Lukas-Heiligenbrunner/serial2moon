@@ -3,7 +3,7 @@ mod bridge;
 mod protocol;
 
 use anyhow::Result;
-use log::{info, error};
+use log::{error, info};
 
 use args::Config;
 use bridge::UartToMoon;
@@ -12,9 +12,9 @@ use bridge::UartToMoon;
 async fn main() -> Result<()> {
     // Load .env file if it exists
     dotenvy::dotenv().ok();
-    
+
     let config = Config::from_env();
-    
+
     // Initialize logger
     if config.verbose {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
@@ -29,14 +29,19 @@ async fn main() -> Result<()> {
     info!("Test mode: {}", config.test_mode);
 
     // Create and run the bridge
-    let bridge = UartToMoon::new(config.socket_path, config.device, config.baud_rate, config.test_mode);
-    
+    let bridge = UartToMoon::new(
+        config.socket_path,
+        config.device,
+        config.baud_rate,
+        config.test_mode,
+    );
+
     match bridge.run().await {
         Ok(_) => {
             info!("Bridge exited successfully");
         }
         Err(e) => {
-            error!("Bridge failed: {}", e);
+            error!("Bridge failed: {e}");
             return Err(e);
         }
     }
