@@ -14,9 +14,26 @@ apt-get install -y --no-install-recommends ca-certificates curl
 # Docker Engine + compose plugin (convenience script picks the right arch/repo).
 curl -fsSL https://get.docker.com | sh
 
-# ModemManager grabs USB-serial devices on plug-in and fights the printer — kill it.
-systemctl disable ModemManager.service 2>/dev/null || true
-systemctl mask ModemManager.service 2>/dev/null || true
+# NOTE: systemd is not running as PID 1 in this build chroot, so `systemctl enable`
+# can't be relied on (get.docker.com's own `systemctl enable --now` warns and no-ops
+# here). We create the unit symlinks by hand instead — that always works offline.
+
+# Enable a unit at boot by linking it into multi-user.target.wants (offline-safe).
+enable_unit() {
+    local unit="$1" d
+    mkdir -p /etc/systemd/system/multi-user.target.wants
+    for d in /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
+        if [ -e "$d/$unit" ]; then
+            ln -sf "$d/$unit" "/etc/systemd/system/multi-user.target.wants/$unit"
+            return 0
+        fi
+    done
+    echo "warning: unit $unit not found to enable" >&2
+}
+
+# ModemManager grabs USB-serial devices on plug-in and fights the printer — mask it
+# (symlink to /dev/null = masked, regardless of whether it's installed).
+ln -sf /dev/null /etc/systemd/system/ModemManager.service
 
 # Install the stack.
 install -d /opt/serial2moon
@@ -29,10 +46,11 @@ BOOTDIR=/boot/firmware
 [ -d "$BOOTDIR" ] || BOOTDIR=/boot
 cp "$SRC/image/files/boot/serial2moon.conf" "$BOOTDIR/serial2moon.conf"
 
-# systemd service: bring the stack up at boot.
+# Bring the stack up at boot. Enable Docker (+ containerd) and our service.
 cp "$SRC/image/files/etc/systemd/system/serial2moon.service" /etc/systemd/system/serial2moon.service
-systemctl enable docker.service 2>/dev/null || true
-systemctl enable serial2moon.service 2>/dev/null || true
+enable_unit docker.service
+enable_unit containerd.service
+enable_unit serial2moon.service
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
