@@ -1,7 +1,9 @@
 name: docker
 
-# Cross-compile the binary for amd64/arm64/armv7 on an amd64 runner (no slow emulated
-# compiles), then pack each into a minimal image and push a multi-arch manifest to GHCR.
+# Build & push a multi-arch image (amd64/arm64/armv7) to GHCR on every push.
+# Cross-compilation happens inside the Dockerfile: the builder stage runs natively on the
+# amd64 runner and cross-compiles to each target triple, so no QEMU-emulated compiles and
+# no `cross` (whose old base images break on modern glibc).
 on:
   push:
     branches: ["**"]
@@ -16,29 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
-      - name: Cross-compile static binaries
-        run: |
-          set -euo pipefail
-          # target triple -> docker platform dir
-          declare -A T=(
-            [x86_64-unknown-linux-musl]=linux/amd64
-            [aarch64-unknown-linux-musl]=linux/arm64
-            [armv7-unknown-linux-musleabihf]=linux/arm/v7
-          )
-          for triple in "${!T[@]}"; do
-            cross build --release --locked --target "$triple"
-            dir="dist/${T[$triple]}"
-            mkdir -p "$dir"
-            cp "target/$triple/release/serial2moon" "$dir/serial2moon"
-          done
 
       - name: Image name (lowercase)
         id: img
@@ -65,7 +44,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.pack
+          file: Dockerfile
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           tags: ${{ steps.meta.outputs.tags }}

@@ -16,19 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
-      - name: Cross-build arm64 binary
-        run: |
-          cross build --release --locked --target aarch64-unknown-linux-musl
-          mkdir -p dist/linux/arm64
-          cp target/aarch64-unknown-linux-musl/release/serial2moon dist/linux/arm64/serial2moon
-
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
@@ -36,8 +23,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p image/files/opt/serial2moon/images
-          # serial2moon: build directly to a docker-loadable tar (no daemon load needed).
-          docker buildx build --platform linux/arm64 -f Dockerfile.pack \
+          # serial2moon: cross-compile arm64 via the Dockerfile, export a docker-loadable tar.
+          docker buildx build --platform linux/arm64 -f Dockerfile \
             -t serial2moon:bundled \
             -o type=docker,dest=image/files/opt/serial2moon/images/serial2moon.tar .
           # Upstream images: pull the arm64 variant and save.
