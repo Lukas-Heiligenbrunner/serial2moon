@@ -1,0 +1,60 @@
+# serial2moon test harness: the bridge (mock printer) + Moonraker + Mainsail.
+#
+#   docker compose up --build
+#   then open http://localhost:8088
+#
+# All three services share the `printer_data` volume so the Klipper socket and the
+# gcode directory line up. serial2moon runs as uid 1000 to match Moonraker's user,
+# so uploaded files and the socket are mutually accessible.
+
+services:
+  serial2moon:
+    build: .
+    user: "1000:1000"
+    depends_on:
+      - moonraker            # let Moonraker initialize the shared volume first
+    command:
+      - "--transport=mock"
+      - "--uds-path=/opt/printer_data/run/klippy.sock"
+      - "--gcode-dir=/opt/printer_data/gcodes"
+    environment:
+      - RUST_LOG=info
+    volumes:
+      # Share exactly the comms (socket) and gcodes dirs with Moonraker. These paths
+      # are declared as VOLUME in the Moonraker image, so they must be mounted
+      # explicitly in BOTH services or the image's anonymous volumes shadow them.
+      - comms:/opt/printer_data/run
+      - gcodes:/opt/printer_data/gcodes
+    restart: unless-stopped
+    # ---- For a real printer instead of the mock, comment the mock command above and use: ----
+    # command:
+    #   - "--transport=serial"
+    #   - "--serial-port=/dev/printer"
+    #   - "--uds-path=/opt/printer_data/run/klippy.sock"
+    #   - "--gcode-dir=/opt/printer_data/gcodes"
+    # devices:
+    #   - "/dev/serial/by-id/usb-XXXX:/dev/printer"
+
+  moonraker:
+    image: mkuf/moonraker:latest
+    volumes:
+      - comms:/opt/printer_data/run
+      - gcodes:/opt/printer_data/gcodes
+      - ./docker/moonraker.conf:/opt/printer_data/config/moonraker.conf:ro
+    ports:
+      - "7125:7125"
+    restart: unless-stopped
+
+  mainsail:
+    image: ghcr.io/mainsail-crew/mainsail:latest
+    depends_on:
+      - moonraker
+    volumes:
+      - ./docker/mainsail-proxy.conf:/etc/nginx/extra-conf.d/moonraker.conf:ro
+    ports:
+      - "8088:80"
+    restart: unless-stopped
+
+volumes:
+  comms:
+  gcodes:

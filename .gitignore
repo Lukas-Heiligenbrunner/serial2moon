@@ -1,1 +1,7 @@
 /target
+/dist
+# Generated at build/runtime, not committed:
+/image/files/opt/serial2moon/images/*.tar
+/image/files/opt/serial2moon/images/.loaded
+**/docker-compose.override.yml
+.env

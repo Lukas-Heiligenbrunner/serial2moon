@@ -1,0 +1,339 @@
+//! The canonical printer model and its projection into Klipper "printer objects".
+//!
+//! [`PrinterState`] is the single source of truth, mutated only by the state actor.
+//! [`PrinterState::full_status`] renders it into the `{object: {field: value}}` map
+//! that `objects/query` and `objects/subscribe` operate on.
+
+use std::collections::BTreeMap;
+
+use serde_json::{Value, json};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KlippyState {
+    Startup,
+    Ready,
+    Shutdown,
+    Error,
+}
+
+impl KlippyState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KlippyState::Startup => "startup",
+            KlippyState::Ready => "ready",
+            KlippyState::Shutdown => "shutdown",
+            KlippyState::Error => "error",
+        }
+    }
+}
+
+/// Print job lifecycle. String values must match Klipper's vocabulary exactly,
+/// or Mainsail's print panel misbehaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintState {
+    Standby,
+    Printing,
+    Paused,
+    Complete,
+    Cancelled,
+    Error,
+}
+
+impl PrintState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PrintState::Standby => "standby",
+            PrintState::Printing => "printing",
+            PrintState::Paused => "paused",
+            PrintState::Complete => "complete",
+            PrintState::Cancelled => "cancelled",
+            PrintState::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PrinterState {
+    pub klippy_state: KlippyState,
+    pub state_message: String,
+
+    // Heaters / fan
+    pub extruder_temp: f64,
+    pub extruder_target: f64,
+    pub extruder_power: f64,
+    pub bed_temp: f64,
+    pub bed_target: f64,
+    pub bed_power: f64,
+    pub fan_speed: f64,
+
+    // Motion (X, Y, Z, E)
+    pub position: [f64; 4],
+    pub gcode_position: [f64; 4],
+    pub homing_origin: [f64; 4],
+    pub homed_axes: String,
+    pub absolute_coordinates: bool,
+    pub absolute_extrude: bool,
+    pub speed: f64,
+    pub speed_factor: f64,
+    pub extrude_factor: f64,
+
+    // Limits (advertised to the frontend)
+    pub axis_minimum: [f64; 4],
+    pub axis_maximum: [f64; 4],
+    pub max_velocity: f64,
+    pub max_accel: f64,
+
+    // Print job
+    pub print_state: PrintState,
+    pub print_filename: String,
+    pub print_message: String,
+    pub total_duration: f64,
+    pub print_duration: f64,
+    pub filament_used: f64,
+    pub sd_file_path: Option<String>,
+    pub sd_progress: f64,
+    pub sd_is_active: bool,
+    pub sd_file_position: u64,
+    pub sd_file_size: u64,
+    pub display_message: String,
+    pub current_layer: Option<u64>,
+    pub total_layer: Option<u64>,
+
+    // Config
+    pub extruder_max_temp: f64,
+    pub bed_max_temp: f64,
+    pub gcode_dir: String,
+}
+
+impl PrinterState {
+    pub fn new(
+        axis_maximum: [f64; 4],
+        max_velocity: f64,
+        max_accel: f64,
+        extruder_max_temp: f64,
+        bed_max_temp: f64,
+        gcode_dir: String,
+    ) -> Self {
+        PrinterState {
+            klippy_state: KlippyState::Startup,
+            state_message: "serial2moon starting up".to_string(),
+            extruder_temp: 0.0,
+            extruder_target: 0.0,
+            extruder_power: 0.0,
+            bed_temp: 0.0,
+            bed_target: 0.0,
+            bed_power: 0.0,
+            fan_speed: 0.0,
+            position: [0.0; 4],
+            gcode_position: [0.0; 4],
+            homing_origin: [0.0; 4],
+            homed_axes: String::new(),
+            absolute_coordinates: true,
+            absolute_extrude: true,
+            speed: 0.0,
+            speed_factor: 1.0,
+            extrude_factor: 1.0,
+            axis_minimum: [0.0, 0.0, 0.0, 0.0],
+            axis_maximum,
+            max_velocity,
+            max_accel,
+            print_state: PrintState::Standby,
+            print_filename: String::new(),
+            print_message: String::new(),
+            total_duration: 0.0,
+            print_duration: 0.0,
+            filament_used: 0.0,
+            sd_file_path: None,
+            sd_progress: 0.0,
+            sd_is_active: false,
+            sd_file_position: 0,
+            sd_file_size: 0,
+            display_message: String::new(),
+            current_layer: None,
+            total_layer: None,
+            extruder_max_temp,
+            bed_max_temp,
+            gcode_dir,
+        }
+    }
+
+    fn xyz(p: &[f64; 4]) -> Value {
+        json!([p[0], p[1], p[2], p[3]])
+    }
+
+    /// Render the full `{object: {field: value}}` status map.
+    pub fn full_status(&self) -> BTreeMap<String, Value> {
+        let mut m = BTreeMap::new();
+
+        m.insert(
+            "webhooks".into(),
+            json!({
+                "state": self.klippy_state.as_str(),
+                "state_message": self.state_message,
+            }),
+        );
+
+        m.insert(
+            "toolhead".into(),
+            json!({
+                "position": Self::xyz(&self.position),
+                "homed_axes": self.homed_axes,
+                "axis_minimum": Self::xyz(&self.axis_minimum),
+                "axis_maximum": Self::xyz(&self.axis_maximum),
+                "extruder": "extruder",
+                "max_velocity": self.max_velocity,
+                "max_accel": self.max_accel,
+                "max_accel_to_decel": self.max_accel / 2.0,
+                "square_corner_velocity": 5.0,
+                "print_time": self.print_duration,
+                "estimated_print_time": self.print_duration,
+                "stalls": 0,
+            }),
+        );
+
+        m.insert(
+            "gcode_move".into(),
+            json!({
+                "speed_factor": self.speed_factor,
+                "speed": self.speed,
+                "extrude_factor": self.extrude_factor,
+                "absolute_coordinates": self.absolute_coordinates,
+                "absolute_extrude": self.absolute_extrude,
+                "homing_origin": Self::xyz(&self.homing_origin),
+                "position": Self::xyz(&self.position),
+                "gcode_position": Self::xyz(&self.gcode_position),
+            }),
+        );
+
+        m.insert(
+            "motion_report".into(),
+            json!({
+                "live_position": Self::xyz(&self.position),
+                "live_velocity": 0.0,
+                "live_extruder_velocity": 0.0,
+            }),
+        );
+
+        m.insert(
+            "extruder".into(),
+            json!({
+                "temperature": round2(self.extruder_temp),
+                "target": self.extruder_target,
+                "power": self.extruder_power,
+                "can_extrude": self.extruder_temp >= 170.0,
+                "pressure_advance": 0.0,
+                "smooth_time": 0.0,
+            }),
+        );
+
+        m.insert(
+            "heater_bed".into(),
+            json!({
+                "temperature": round2(self.bed_temp),
+                "target": self.bed_target,
+                "power": self.bed_power,
+            }),
+        );
+
+        m.insert(
+            "fan".into(),
+            json!({ "speed": self.fan_speed, "rpm": Value::Null }),
+        );
+
+        // Moonraker queries `heaters.available_sensors` to decide which temperatures to
+        // record in its temperature store — which is what powers Mainsail's temp graph.
+        m.insert(
+            "heaters".into(),
+            json!({
+                "available_heaters": ["extruder", "heater_bed"],
+                "available_sensors": ["extruder", "heater_bed"],
+            }),
+        );
+
+        m.insert(
+            "display_status".into(),
+            json!({ "message": self.display_message, "progress": self.sd_progress }),
+        );
+
+        m.insert(
+            "print_stats".into(),
+            json!({
+                "filename": self.print_filename,
+                "total_duration": round2(self.total_duration),
+                "print_duration": round2(self.print_duration),
+                "filament_used": round2(self.filament_used),
+                "state": self.print_state.as_str(),
+                "message": self.print_message,
+                "info": { "total_layer": self.total_layer, "current_layer": self.current_layer },
+            }),
+        );
+
+        m.insert(
+            "virtual_sdcard".into(),
+            json!({
+                "file_path": self.sd_file_path,
+                "progress": self.sd_progress,
+                "is_active": self.sd_is_active,
+                "file_position": self.sd_file_position,
+                "file_size": self.sd_file_size,
+            }),
+        );
+
+        m.insert(
+            "pause_resume".into(),
+            json!({ "is_paused": self.print_state == PrintState::Paused }),
+        );
+
+        let idle_state = match self.print_state {
+            PrintState::Printing | PrintState::Paused => "Printing",
+            _ => "Ready",
+        };
+        m.insert(
+            "idle_timeout".into(),
+            json!({ "state": idle_state, "printing_time": round2(self.print_duration) }),
+        );
+
+        m.insert("configfile".into(), self.configfile());
+
+        m
+    }
+
+    /// The `configfile` object. Mainsail reads `settings.virtual_sdcard.path` to find
+    /// the G-code directory, and the section presence to decide UI capabilities.
+    fn configfile(&self) -> Value {
+        let settings = json!({
+            "virtual_sdcard": { "path": self.gcode_dir },
+            "printer": {
+                "kinematics": "cartesian",
+                "max_velocity": self.max_velocity,
+                "max_accel": self.max_accel,
+            },
+            // min_temp/max_temp set the allowed range for the frontend's temperature inputs.
+            "extruder": {
+                "min_temp": 0.0,
+                "max_temp": self.extruder_max_temp,
+                "min_extrude_temp": 170.0,
+            },
+            "heater_bed": { "min_temp": 0.0, "max_temp": self.bed_max_temp },
+            "pause_resume": {},
+            "display_status": {},
+            // Advertise the print-control macros so frontends (Mainsail) recognize them
+            // and stop warning that they are undefined. serial2moon handles these commands
+            // directly in its G-code layer.
+            "gcode_macro PAUSE": { "rename_existing": "BASE_PAUSE" },
+            "gcode_macro RESUME": { "rename_existing": "BASE_RESUME" },
+            "gcode_macro CANCEL_PRINT": { "rename_existing": "BASE_CANCEL_PRINT" },
+        });
+        json!({
+            "config": settings,
+            "settings": settings,
+            "save_config_pending": false,
+            "save_config_pending_items": {},
+            "warnings": [],
+        })
+    }
+}
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}

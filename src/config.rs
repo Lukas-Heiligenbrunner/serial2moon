@@ -1,0 +1,77 @@
+//! Runtime configuration, sourced from CLI flags and environment (`.env` via dotenvy).
+
+use std::path::PathBuf;
+
+use clap::{Parser, ValueEnum};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TransportKind {
+    /// In-process simulated Marlin printer. No hardware required.
+    Mock,
+    /// Real USB serial device.
+    Serial,
+}
+
+/// serial2moon — bridge a legacy Marlin G-code printer to Moonraker by
+/// emulating the Klipper API server over a Unix domain socket.
+#[derive(Debug, Clone, Parser)]
+#[command(name = "serial2moon", version, about)]
+pub struct Config {
+    /// Path of the Unix domain socket Moonraker connects to (klippy_uds_address).
+    #[arg(long, env = "S2M_UDS", default_value = "/tmp/klippy_uds")]
+    pub uds_path: PathBuf,
+
+    /// Directory holding G-code files (must match Moonraker's upload dir / virtual_sdcard path).
+    #[arg(long, env = "S2M_GCODE_DIR", default_value = "./gcodes")]
+    pub gcode_dir: PathBuf,
+
+    /// Transport backend.
+    #[arg(long, value_enum, env = "S2M_TRANSPORT", default_value = "mock")]
+    pub transport: TransportKind,
+
+    /// Serial device (e.g. /dev/serial/by-id/...). Required when --transport serial.
+    #[arg(long, env = "S2M_SERIAL_PORT")]
+    pub serial_port: Option<String>,
+
+    /// Serial baud rate. Omit to autodetect via M115.
+    #[arg(long, env = "S2M_BAUD")]
+    pub baud: Option<u32>,
+
+    /// Max X/Y/Z travel (mm), advertised to the frontend as axis limits.
+    #[arg(long, env = "S2M_BED_SIZE", default_value = "220,220,250")]
+    pub bed_size: String,
+
+    /// Max velocity (mm/s) advertised to the frontend.
+    #[arg(long, env = "S2M_MAX_VELOCITY", default_value_t = 300.0)]
+    pub max_velocity: f64,
+
+    /// Max acceleration (mm/s^2) advertised to the frontend.
+    #[arg(long, env = "S2M_MAX_ACCEL", default_value_t = 3000.0)]
+    pub max_accel: f64,
+
+    /// Max hotend temperature (°C) advertised to the frontend (sets the UI input limit).
+    #[arg(long, env = "S2M_EXTRUDER_MAX_TEMP", default_value_t = 300.0)]
+    pub extruder_max_temp: f64,
+
+    /// Max bed temperature (°C) advertised to the frontend (sets the UI input limit).
+    #[arg(long, env = "S2M_BED_MAX_TEMP", default_value_t = 120.0)]
+    pub bed_max_temp: f64,
+
+    /// Mock printer only: stretch a simulated print to roughly this many seconds, paced
+    /// by file progress so it's independent of file size. 0 disables pacing (instant).
+    #[arg(long, env = "S2M_MOCK_PRINT_SECONDS", default_value_t = 60)]
+    pub mock_print_seconds: u64,
+}
+
+impl Config {
+    /// Parse `bed_size` ("x,y,z") into axis maxima.
+    pub fn axis_maximum(&self) -> [f64; 4] {
+        let mut out = [220.0, 220.0, 250.0, 0.0];
+        for (i, part) in self.bed_size.split(',').take(3).enumerate() {
+            if let Ok(v) = part.trim().parse::<f64>() {
+                out[i] = v;
+            }
+        }
+        out
+    }
+}

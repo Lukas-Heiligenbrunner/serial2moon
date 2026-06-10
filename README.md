@@ -1,175 +1,109 @@
-# Uart2Moon
+# serial2moon
 
-A Rust application that creates a bridge between a 3D printer's USB UART interface and Moonraker's Unix socket, allowing modern tools like Mainsail to control legacy printers.
+Run the modern Klipper web frontends (Mainsail / Fluidd) on a **legacy Marlin printer**.
 
-## Overview
+serial2moon is a small Rust daemon for a Raspberry Pi (or any Linux host) that talks
+**Marlin G-code over USB serial** to the printer, while presenting a **Klipper API server**
+on a Unix domain socket. Moonraker connects to that socket believing it is talking to
+Klipper — so the whole Mainsail/Fluidd + Moonraker stack works against a printer that
+only speaks plain Marlin G-code, with no firmware change.
 
-Uart2Moon acts as a translation layer that:
-- Creates a Unix socket that mimics Klipper's interface
-- Connects to a 3D printer via USB UART
-- Translates between Moonraker's JSON-RPC protocol and G-code commands
-- Enables use of modern printer interfaces with legacy firmware
+```
+ Mainsail/Fluidd ──HTTP/WS──▶ Moonraker ──UDS (Klipper API)──▶ serial2moon ──USB serial──▶ Marlin printer
+```
 
-## Installation
+## Status
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Lukas-Heiligenbrunner/uart2moon.git
-   cd uart2moon
-   ```
+MVP. Working today, verified end-to-end against real Moonraker + Mainsail containers:
 
-2. Build the application:
-   ```bash
-   cargo build --release
-   ```
+- Klipper API server over UDS: `info`, `objects/list`, `objects/query`, `objects/subscribe`
+  (with per-connection field-level deltas), `gcode/script`, `gcode/subscribe_output`,
+  `register_remote_method`, `emergency_stop`, `list_endpoints`.
+- Live temperatures, targets, fan.
+- **Live toolhead position + homed axes**, tracked optimistically from outgoing
+  `G0/G1/G28/G90/G91/G92/M82/M83` (Marlin doesn't stream position).
+- Print start / pause / resume / cancel, with byte-accurate progress.
+- G-code translation: standard codes pass through; Klipper-isms
+  (`SET_HEATER_TEMPERATURE`, `TURN_OFF_HEATERS`, `SET_FAN_SPEED`) are translated;
+  unknown Klipper macros are **acked-and-logged** so the UI never hangs.
+- Marlin serial handling: depth-1 `ok` flow control, `busy:`-aware timeouts, `M155`
+  temperature autoreport, `M115` baud autodetection.
+- **Resilience**: automatic serial reconnect with exponential backoff (survives USB
+  re-enumeration / printer power-cycle); commands fail fast while offline instead of
+  hanging the UI; mid-print printer reset (`start` banner) re-initializes in place and
+  fails the active job cleanly.
+- A built-in **mock printer** so you can run the whole thing with no hardware.
 
-## Usage
+See `docs` in [`/home/lukas/.claude/plans/parallel-bouncing-pancake.md`](.) for the design,
+the protocol notes, and documented MVP scope cuts.
 
-### Basic Usage
+## Quick start (no hardware)
+
 ```bash
-./target/release/Uart2Moon --device /dev/ttyUSB0 --socket-path /tmp/printer
+cargo run -- --transport mock --uds-path /tmp/klippy_uds --gcode-dir ./gcodes
 ```
 
-### Command Line Options
-- `--socket-path` (or `-s`): Path where the Unix socket will be created (default: `/tmp/printer`)
-- `--device` (or `-d`): Serial device path (default: `/dev/ttyUSB0`)
-- `--baud-rate` (or `-b`): Serial communication baud rate (default: `115200`)
-- `--test-mode` (or `-t`): Run in test mode without connecting to serial device
-- `--verbose` (or `-v`): Enable verbose logging
+Then point a Moonraker at `klippy_uds_address: /tmp/klippy_uds`.
 
-### Test Mode
-For development and testing without hardware:
+## Full test harness (Moonraker + Mainsail in Docker)
+
 ```bash
-./target/release/Uart2Moon --test-mode --verbose
+docker compose up --build
+# open http://localhost:8088   (Mainsail)
+# Moonraker API on http://localhost:7125
 ```
 
-## Configuration with Moonraker
+The three containers share the socket and gcode directories via named volumes. Confirm the
+bridge is recognized:
 
-Configure Moonraker to use the Unix socket created by Uart2Moon by setting the `klippy_uds_address` in your `moonraker.conf`:
-
-```ini
-[server]
-klippy_uds_address: /tmp/printer
-```
-
-## Supported Klipper Commands
-
-The application currently supports these Klipper protocol methods:
-- `info` - Returns printer information
-- `objects/list` - Lists available printer objects  
-- `objects/query` - Queries printer status
-- `gcode/script` - Executes G-code commands
-- `emergency_stop` - Emergency stop (sends M112)
-
-## Protocol Translation
-
-Uart2Moon translates between:
-- **Input**: Moonraker's JSON-RPC over Unix socket
-- **Output**: G-code commands over USB UART
-
-Example translation:
-```json
-// Input from Moonraker
-{"id": 1, "method": "gcode/script", "params": {"script": "G28"}}
-
-// Translated to printer
-G28
-
-// Response from printer  
-ok
-
-// Response to Moonraker
-{"id": 1, "result": {}, "error": null}
-```
-
-## Testing
-
-Test the socket communication manually:
 ```bash
-# Start uart2moon in test mode
-./target/release/Uart2Moon --test-mode
+curl -s http://localhost:7125/server/info | grep -o '"klippy_state": "[a-z]*"'
+# -> "klippy_state": "ready"
+```
 
-# In another terminal, test commands
-echo '{"id": 1, "method": "info"}' | nc -U /tmp/printer
-echo '{"id": 2, "method": "gcode/script", "params": {"script": "G28"}}' | nc -U /tmp/printer
+Upload a `.gcode` in Mainsail and print it — progress, pause/resume, and temperatures all
+work against the simulated printer.
+
+## Using a real printer
+
+```bash
+cargo run -- --transport serial \
+  --serial-port /dev/serial/by-id/usb-YOUR-PRINTER \
+  --gcode-dir /home/pi/printer_data/gcodes \
+  --uds-path /home/pi/printer_data/comms/klippy.sock
+```
+
+Omit `--baud` to autodetect (probes common bauds and gates on an `M115` `FIRMWARE_NAME:`
+reply). Prefer a `/dev/serial/by-id/...` path so USB re-enumeration doesn't break it.
+
+For the Docker harness with real hardware, see the commented `serial` block in
+`compose.yml` (uncomment the `command:` and `devices:` entries).
+
+## Configuration
+
+CLI flags or environment (`.env` is auto-loaded). See `.env.example`. Notably:
+
+| Flag / env | Default | Meaning |
+|---|---|---|
+| `--transport` / `S2M_TRANSPORT` | `mock` | `mock` or `serial` |
+| `--uds-path` / `S2M_UDS` | `/tmp/klippy_uds` | socket Moonraker connects to |
+| `--gcode-dir` / `S2M_GCODE_DIR` | `./gcodes` | gcode files (match Moonraker) |
+| `--serial-port` / `S2M_SERIAL_PORT` | — | serial device (serial mode) |
+| `--baud` / `S2M_BAUD` | autodetect | serial baud |
+| `--bed-size` / `S2M_BED_SIZE` | `220,220,250` | advertised X,Y,Z limits |
+
+## Development
+
+```bash
+cargo test      # unit tests + a real-PTY serial integration test
+cargo clippy
 ```
 
 ## Architecture
 
-```
-┌─────────────┐    Unix Socket    ┌─────────────┐    USB UART    ┌─────────────┐
-│  Moonraker  │ ←─────────────── │ Uart2Moon   │ ─────────────→ │ 3D Printer  │
-│  (Mainsail) │   JSON-RPC       │             │    G-code      │   Legacy FW │
-└─────────────┘                  └─────────────┘                 └─────────────┘
-```
-
-## Requirements
-
-- Rust 1.70+ 
-- tokio runtime for async I/O
-- Access to serial device (typically requires being in `dialout` group on Linux)
-
-## Development Environment
-
-A complete development environment with Moonraker and Mainsail is available using Docker Compose. This setup runs uart2moon in test mode (no real serial device required) and provides a full web interface for testing.
-
-### Quick Start
-
-1. Validate your setup (optional):
-   ```bash
-   ./test-env.sh
-   ```
-
-2. Start the development environment:
-   ```bash
-   docker-compose up -d
-   ```
-
-3. Access the interfaces:
-   - **Mainsail Web Interface**: http://localhost:8080
-   - **Moonraker API**: http://localhost:7125
-
-4. Stop the environment:
-   ```bash
-   docker-compose down
-   ```
-
-### What's Included
-
-- **uart2moon**: Runs in test mode, creating a mock printer interface
-- **Moonraker**: Provides the JSON-RPC API that Mainsail uses
-- **Mainsail**: Modern web interface for printer control
-
-### Testing the Setup
-
-You can test the connection by sending commands through Mainsail or directly to the Moonraker API:
-
-```bash
-# Test via Moonraker API
-curl -X POST http://localhost:7125/printer/gcode/script \
-     -H "Content-Type: application/json" \
-     -d '{"script": "G28"}'
-
-# Check printer status
-curl http://localhost:7125/printer/info
-```
-
-### Development Workflow
-
-1. Make changes to the Rust code
-2. Rebuild the container:
-   ```bash
-   docker-compose build uart2moon
-   docker-compose up -d
-   ```
-3. Test changes through the Mainsail interface
-
-### Troubleshooting
-
-- **Mainsail shows "Printer not connected"**: Wait a few seconds for uart2moon to start and create the socket
-- **Port conflicts**: Modify the ports in `docker-compose.yml` if 8080 or 7125 are already in use
-- **Build failures**: Ensure you have Docker and Docker Compose installed
-
-## License
-
-[Add your license information here]
+`src/state` is the single source of truth (one actor task, `watch`-published snapshots).
+`src/transport` abstracts the byte stream (`serial.rs` real port, `mock.rs` in-process
+Marlin sim). `src/serial_session` is the sole writer to the printer with a priority inbox
+and the `ok` handshake. `src/klipper_api` is the UDS server (`codec.rs` 0x03 framing,
+`dispatch.rs` methods, `subscribe.rs` delta logic). `src/gcode` translates commands and
+`src/print_job` streams files to the printer.

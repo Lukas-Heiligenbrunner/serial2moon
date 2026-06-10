@@ -1,0 +1,8 @@
+# Overlay applied (as docker-compose.override.yml) by start.sh when a real serial device
+# is configured. Maps the host device into the container and grants the dialout group.
+services:
+  serial2moon:
+    group_add:
+      - "20" # 'dialout' gid on Raspberry Pi OS — required to access the serial port
+    devices:
+      - "${SERIAL_DEVICE}:/dev/printer"

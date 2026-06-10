@@ -1,50 +1,98 @@
-mod args;
-mod bridge;
-mod protocol;
+//! serial2moon — bridge a legacy Marlin G-code printer to Moonraker by emulating the
+//! Klipper API server over a Unix domain socket.
 
-use anyhow::Result;
-use log::{error, info};
+mod app;
+mod config;
+mod gcode;
+mod klipper_api;
+mod print_job;
+mod serial_session;
+mod state;
+mod transport;
 
-use args::Config;
-use bridge::UartToMoon;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use tokio::sync::broadcast;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
+
+use app::App;
+use config::Config;
+use print_job::PrintHandle;
+use state::{PrinterState, StateHandle};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load .env file if it exists
-    dotenvy::dotenv().ok();
+    let _ = dotenvy::dotenv();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
 
-    let config = Config::from_env();
+    let config = Config::parse();
+    info!(transport = ?config.transport, socket = %config.uds_path.display(), "starting serial2moon");
 
-    // Initialize logger
-    if config.verbose {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
-    } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    }
+    tokio::fs::create_dir_all(&config.gcode_dir)
+        .await
+        .with_context(|| format!("creating gcode dir {}", config.gcode_dir.display()))?;
+    // Resolve to an absolute path so it can be compared against Moonraker's gcodes path —
+    // a mismatch is the usual reason a print "does nothing".
+    let gcode_abs =
+        std::fs::canonicalize(&config.gcode_dir).unwrap_or_else(|_| config.gcode_dir.clone());
+    info!(gcode_dir = %gcode_abs.display(), "serving G-code files from this directory (must match Moonraker's gcodes path)");
 
-    info!("Starting Uart2Moon bridge");
-    info!("Socket path: {:?}", config.socket_path);
-    info!("Device: {}", config.device);
-    info!("Baud rate: {}", config.baud_rate);
-    info!("Test mode: {}", config.test_mode);
+    // State actor.
+    let state = StateHandle::spawn(PrinterState::new(
+        config.axis_maximum(),
+        config.max_velocity,
+        config.max_accel,
+        config.extruder_max_temp,
+        config.bed_max_temp,
+        config.gcode_dir.to_string_lossy().to_string(),
+    ));
 
-    // Create and run the bridge
-    let bridge = UartToMoon::new(
-        config.socket_path,
-        config.device,
-        config.baud_rate,
-        config.test_mode,
+    // Console (Marlin echo/error) fan-out.
+    let (console, _) = broadcast::channel::<String>(256);
+
+    // The serial supervisor owns transport (re)connection + printer init; the handle is
+    // stable across reconnects.
+    let config = Arc::new(config);
+    let print = PrintHandle::new();
+    let serial = serial_session::spawn(
+        config.clone(),
+        state.clone(),
+        console.clone(),
+        print.clone(),
     );
 
-    match bridge.run().await {
-        Ok(_) => {
-            info!("Bridge exited successfully");
-        }
-        Err(e) => {
-            error!("Bridge failed: {e}");
-            return Err(e);
-        }
+    let app = App {
+        config: config.clone(),
+        state,
+        serial,
+        console,
+        print,
+    };
+
+    tokio::select! {
+        r = klipper_api::serve(app) => r?,
+        _ = shutdown_signal() => info!("shutdown signal received"),
     }
 
+    let _ = std::fs::remove_file(&config.uds_path);
+    info!("serial2moon stopped");
     Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    let mut int = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
+    }
 }
