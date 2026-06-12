@@ -11,8 +11,8 @@
 pub mod motion;
 pub mod parser;
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -27,11 +27,19 @@ use crate::transport;
 use motion::Motion;
 use parser::{Line, TempReport};
 
-/// Max time to wait for an `ok` (reset by every `busy:`); covers slow homing/leveling.
-const ACK_TIMEOUT: Duration = Duration::from_secs(30);
+/// A command is considered hung only after this long with NO data at all from the printer.
+/// Blocking G-code (M109/M190 heat waits, G28/G29) can take minutes, but the printer keeps
+/// streaming temperature lines meanwhile — so we time out on silence, not on elapsed time.
+const SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often the command wait wakes to check for silence.
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Reconnect backoff bounds.
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Shared "last byte received from the printer" timestamp, used to distinguish a busy
+/// printer (still streaming temps) from a hung/disconnected one.
+type LastSeen = Arc<Mutex<Instant>>;
 
 struct Cmd {
     line: String,
@@ -193,6 +201,7 @@ async fn run_connection(
     let (read, mut write) = tokio::io::split(transport);
     let (ack_tx, mut ack_rx) = mpsc::channel(64);
     let (restart_tx, mut restart_rx) = mpsc::unbounded_channel();
+    let last_seen: LastSeen = Arc::new(Mutex::new(Instant::now()));
 
     let reader = tokio::spawn(reader(
         read,
@@ -201,12 +210,13 @@ async fn run_connection(
         ack_tx,
         print.clone(),
         restart_tx,
+        last_seen.clone(),
     ));
     tokio::pin!(reader);
 
     // Initialize the printer for this connection: identify, enable temp autoreport.
-    let _ = send_and_wait(&mut write, "M115", &mut ack_rx).await;
-    let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx).await;
+    let _ = send_and_wait(&mut write, "M115", &mut ack_rx, &last_seen).await;
+    let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx, &last_seen).await;
     state.update(|s| {
         s.klippy_state = KlippyState::Ready;
         s.state_message = "Printer is ready".to_string();
@@ -222,13 +232,13 @@ async fn run_connection(
                 // Printer reset mid-session (watchdog/brownout): the link is still up, so
                 // re-initialize in place rather than reconnecting. Homing/position are lost.
                 warn!("re-initializing printer after reset");
-                let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx).await;
+                let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx, &last_seen).await;
                 motion = Motion::new();
                 push_motion(state, &motion);
             }
             cmd = recv_cmd(high_rx, low_rx) => {
                 let Some(cmd) = cmd else { break ConnectionEnd::Shutdown };
-                let result = send_and_wait(&mut write, &cmd.line, &mut ack_rx).await;
+                let result = send_and_wait(&mut write, &cmd.line, &mut ack_rx, &last_seen).await;
                 if result.is_ok() && motion.apply(&cmd.line) {
                     push_motion(state, &motion);
                 }
@@ -299,47 +309,52 @@ async fn reader<R: AsyncReadExt + Unpin>(
     ack_tx: mpsc::Sender<AckEvent>,
     print: PrintHandle,
     restart_tx: mpsc::UnboundedSender<()>,
+    last_seen: LastSeen,
 ) {
     let mut lines = BufReader::new(read).lines();
     loop {
         match lines.next_line().await {
-            Ok(Some(raw)) => match parser::classify(&raw) {
-                Line::Ok(t) => {
-                    if !t.is_empty() {
-                        apply_temps(&state, t);
+            Ok(Some(raw)) => {
+                // Any line means the printer is alive — used to gate the command timeout.
+                *last_seen.lock().unwrap() = Instant::now();
+                match parser::classify(&raw) {
+                    Line::Ok(t) => {
+                        if !t.is_empty() {
+                            apply_temps(&state, t);
+                        }
+                        let _ = ack_tx.send(AckEvent::Ok).await;
                     }
-                    let _ = ack_tx.send(AckEvent::Ok).await;
+                    Line::Temp(t) => apply_temps(&state, t),
+                    Line::Busy => {
+                        let _ = ack_tx.send(AckEvent::Busy).await;
+                    }
+                    Line::Resend(n) => {
+                        let _ = ack_tx.send(AckEvent::Resend(n)).await;
+                    }
+                    Line::Error(msg) => {
+                        warn!(error = %msg, "printer reported error");
+                        let _ = console.send(format!("!! {msg}"));
+                        let _ = ack_tx.send(AckEvent::Error(msg)).await;
+                    }
+                    Line::Echo(msg) => {
+                        let _ = console.send(format!("// {msg}"));
+                    }
+                    Line::Start => {
+                        warn!("printer reset (start banner) detected");
+                        let _ = console.send("// printer reset detected".to_string());
+                        state.update(|s| s.homed_axes.clear());
+                        // Fail any active print; nothing was safely delivered after the reset.
+                        print.abort().await;
+                        // Ask the supervisor to re-initialize the printer in place. Keep reading:
+                        // the link is still up and temps/acks keep arriving on it.
+                        let _ = restart_tx.send(());
+                    }
+                    Line::Other(msg) => {
+                        debug!(line = %msg, "printer output");
+                        let _ = console.send(msg);
+                    }
                 }
-                Line::Temp(t) => apply_temps(&state, t),
-                Line::Busy => {
-                    let _ = ack_tx.send(AckEvent::Busy).await;
-                }
-                Line::Resend(n) => {
-                    let _ = ack_tx.send(AckEvent::Resend(n)).await;
-                }
-                Line::Error(msg) => {
-                    warn!(error = %msg, "printer reported error");
-                    let _ = console.send(format!("!! {msg}"));
-                    let _ = ack_tx.send(AckEvent::Error(msg)).await;
-                }
-                Line::Echo(msg) => {
-                    let _ = console.send(format!("// {msg}"));
-                }
-                Line::Start => {
-                    warn!("printer reset (start banner) detected");
-                    let _ = console.send("// printer reset detected".to_string());
-                    state.update(|s| s.homed_axes.clear());
-                    // Fail any active print; nothing was safely delivered after the reset.
-                    print.abort().await;
-                    // Ask the supervisor to re-initialize the printer in place. Keep reading:
-                    // the link is still up and temps/acks keep arriving on it.
-                    let _ = restart_tx.send(());
-                }
-                Line::Other(msg) => {
-                    debug!(line = %msg, "printer output");
-                    let _ = console.send(msg);
-                }
-            },
+            }
             Ok(None) => {
                 warn!("serial connection closed by peer");
                 return;
@@ -356,6 +371,7 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
     write: &mut W,
     line: &str,
     ack_rx: &mut mpsc::Receiver<AckEvent>,
+    last_seen: &LastSeen,
 ) -> Result<()> {
     // Discard any acks left over from a previous command before issuing this one.
     while ack_rx.try_recv().is_ok() {}
@@ -364,7 +380,7 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
 
     let mut resends = 0u32;
     loop {
-        match timeout(ACK_TIMEOUT, ack_rx.recv()).await {
+        match timeout(POLL_INTERVAL, ack_rx.recv()).await {
             Ok(Some(AckEvent::Ok)) => return Ok(()),
             Ok(Some(AckEvent::Busy)) => continue,
             Ok(Some(AckEvent::Resend(n))) => {
@@ -385,7 +401,15 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
                 return Ok(());
             }
             Ok(None) => bail!("serial reader stopped"),
-            Err(_) => bail!("timed out waiting for ok to: {line}"),
+            Err(_) => {
+                // No ack yet. Blocking commands (M109/M190/G28/G29) can run for minutes,
+                // but the printer keeps streaming temps meanwhile — so only fail on real
+                // silence (likely a hang/disconnect), not on elapsed time.
+                let idle = last_seen.lock().unwrap().elapsed();
+                if idle >= SILENCE_TIMEOUT {
+                    bail!("no response to '{line}' — printer silent for {idle:?}");
+                }
+            }
         }
     }
 }
