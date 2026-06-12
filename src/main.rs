@@ -10,29 +10,53 @@ mod serial_session;
 mod state;
 mod transport;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::broadcast;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, fmt};
 
 use app::App;
 use config::Config;
 use print_job::PrintHandle;
 use state::{PrinterState, StateHandle};
 
+/// Set up logging to stdout and, when `log_dir` is set, additionally to
+/// `<log_dir>/serial2moon.log`. Returns the appender guard, which must be kept alive.
+fn init_logging(log_dir: Option<&Path>) -> Option<WorkerGuard> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let (file_layer, guard) = match log_dir {
+        Some(dir) => {
+            let _ = std::fs::create_dir_all(dir);
+            let appender = tracing_appender::rolling::never(dir, "serial2moon.log");
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            (
+                Some(fmt::layer().with_ansi(false).with_writer(writer)),
+                Some(guard),
+            )
+        }
+        None => (None, None),
+    };
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer())
+        .with(file_layer)
+        .init();
+    guard
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let config = Config::parse();
+    let _log_guard = init_logging(config.log_dir.as_deref());
     info!(transport = ?config.transport, socket = %config.uds_path.display(), "starting serial2moon");
 
     tokio::fs::create_dir_all(&config.gcode_dir)

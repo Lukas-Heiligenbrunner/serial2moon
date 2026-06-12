@@ -52,6 +52,14 @@ enable_unit docker.service
 enable_unit containerd.service
 enable_unit serial2moon.service
 
+# Enable SSH for headless debugging. The `ssh` flag on the boot partition is the canonical
+# Raspberry Pi OS way to start sshd at boot; we also enable the unit directly.
+# NOTE: a login user must still be set via Raspberry Pi Imager's OS customization (gear
+# icon) or a userconf.txt on the boot partition — RPi OS ships no default user.
+apt-get install -y --no-install-recommends openssh-server || true
+enable_unit ssh.service
+touch "$BOOTDIR/ssh"
+
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 echo "serial2moon provisioning complete"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Boot-time launcher for the serial2moon stack. Loads the pre-baked container images
-# (once), turns the user's /boot config into a .env + optional serial overlay, and brings
-# the compose stack up. Invoked by serial2moon.service.
+# (once), turns the user's /boot config into a .env, and brings the compose stack up.
+# Invoked by serial2moon.service. serial2moon always runs in serial mode and autodetects
+# the printer; the optional overrides below just pin a device/baud if needed.
 set -euo pipefail
 cd /opt/serial2moon
 
@@ -24,26 +25,15 @@ BED_MAX_TEMP=120
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && source "$CONF"
 
-# 3) Generate .env consumed by compose / the binary (clap reads S2M_* from the env).
+# 3) Generate .env (clap reads S2M_* from the env). Transport is fixed to serial in
+#    compose.yml; SERIAL_DEVICE/SERIAL_BAUD are optional pins (else auto).
 {
     echo "S2M_EXTRUDER_MAX_TEMP=${EXTRUDER_MAX_TEMP}"
     echo "S2M_BED_MAX_TEMP=${BED_MAX_TEMP}"
+    # /dev is bind-mounted whole, so the host device path is valid inside the container.
+    [ -n "${SERIAL_DEVICE}" ] && echo "S2M_SERIAL_PORT=${SERIAL_DEVICE}"
+    [ -n "${SERIAL_BAUD}" ] && echo "S2M_BAUD=${SERIAL_BAUD}"
 } >.env
-
-if [ -n "${SERIAL_DEVICE}" ] && [ -e "${SERIAL_DEVICE}" ]; then
-    echo "serial2moon: using printer at ${SERIAL_DEVICE}"
-    {
-        echo "S2M_TRANSPORT=serial"
-        echo "S2M_SERIAL_PORT=/dev/printer"
-        echo "SERIAL_DEVICE=${SERIAL_DEVICE}"
-        [ -n "${SERIAL_BAUD}" ] && echo "S2M_BAUD=${SERIAL_BAUD}"
-    } >>.env
-    cp -f compose.serial.yml docker-compose.override.yml
-else
-    echo "serial2moon: no serial device configured/found -> mock mode"
-    echo "S2M_TRANSPORT=mock" >>.env
-    rm -f docker-compose.override.yml
-fi
 
 # 4) Start (idempotent; containers also auto-restart via 'restart: unless-stopped').
 docker compose up -d

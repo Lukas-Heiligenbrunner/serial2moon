@@ -48,7 +48,18 @@ jobs:
           mv "${{ steps.build.outputs.image }}" serial2moon-rpi-arm64.img
           xz -T0 -9 serial2moon-rpi-arm64.img
 
+      # Always keep the image as a workflow artifact, so a release-upload hiccup never
+      # wastes the (slow) bake — it's downloadable from the run's Artifacts.
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial2moon-rpi-arm64
+          path: serial2moon-rpi-arm64.img.xz
+          retention-days: 7
+
       - name: Attach image to release
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           files: serial2moon-rpi-arm64.img.xz

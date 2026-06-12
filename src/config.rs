@@ -29,7 +29,8 @@ pub struct Config {
     #[arg(long, value_enum, env = "S2M_TRANSPORT", default_value = "mock")]
     pub transport: TransportKind,
 
-    /// Serial device (e.g. /dev/serial/by-id/...). Required when --transport serial.
+    /// Serial device (e.g. /dev/serial/by-id/...). When --transport serial and this is
+    /// omitted, serial2moon autodetects the printer among the connected serial devices.
     #[arg(long, env = "S2M_SERIAL_PORT")]
     pub serial_port: Option<String>,
 
@@ -61,6 +62,11 @@ pub struct Config {
     /// by file progress so it's independent of file size. 0 disables pacing (instant).
     #[arg(long, env = "S2M_MOCK_PRINT_SECONDS", default_value_t = 60)]
     pub mock_print_seconds: u64,
+
+    /// If set, also write logs to `<dir>/serial2moon.log` (in addition to stdout). In the
+    /// Pi image this points at Moonraker's logs dir so the log is downloadable in Mainsail.
+    #[arg(long, env = "S2M_LOG_DIR")]
+    pub log_dir: Option<PathBuf>,
 }
 
 impl Config {

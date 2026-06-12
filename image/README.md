@@ -6,19 +6,26 @@ Moonraker + Mainsail — pre-installed and started at boot. No terminal setup re
 ## Use it (for end users)
 
 1. Download `serial2moon-rpi-arm64.img.xz` from the project's **Releases**.
-2. Flash it with Raspberry Pi Imager (set Wi-Fi/hostname/SSH in the Imager's OS-customization
-   step if you want them).
-3. Before ejecting, open the **boot** partition and edit `serial2moon.conf`:
-   ```
-   SERIAL_DEVICE="/dev/serial/by-id/usb-...your-printer..."
-   EXTRUDER_MAX_TEMP=300
-   BED_MAX_TEMP=120
-   ```
-   Leave `SERIAL_DEVICE` empty to boot the **simulated** printer (great for a first test).
-4. Boot the Pi and open `http://<pi-hostname>/` (Mainsail). Moonraker is on `:7125`.
+2. Flash it with Raspberry Pi Imager and use the **⚙ OS-customization** step to set a
+   username + password, enable **SSH**, and configure **Wi-Fi**/hostname.
+3. Connect your printer's USB cable, boot the Pi, and open `http://<pi-hostname>/`
+   (Mainsail). Moonraker is on `:7125`.
 
-To change settings later: edit `/boot/firmware/serial2moon.conf` and
-`sudo systemctl restart serial2moon` (or reboot).
+serial2moon **autodetects** the printer among the connected USB serial devices — no
+configuration needed in the common case. If no printer is found it reports an error and
+keeps retrying (there is no demo/mock mode in this image).
+
+Optional tuning in the boot partition's `serial2moon.conf` (then reboot or
+`sudo systemctl restart serial2moon`):
+```
+EXTRUDER_MAX_TEMP=300        # match your firmware; bounds the UI temp inputs
+BED_MAX_TEMP=120
+SERIAL_DEVICE=""             # pin a specific /dev/serial/by-id/... path (else autodetect)
+SERIAL_BAUD=""               # pin a baud (else autodetect via M115)
+```
+
+Logs are written to Moonraker's logs dir, so `serial2moon.log` is downloadable from
+Mainsail's **Machine → Logfiles**.
 
 Targets **arm64** (Pi 3 / 4 / 5 / Zero 2 W).
 
@@ -37,7 +44,7 @@ Targets **arm64** (Pi 3 / 4 / 5 / Zero 2 W).
 ## Layout
 
 - `provision.sh` — runs inside the image at build time.
-- `files/opt/serial2moon/` — the stack: `compose.yml`, `compose.serial.yml`, `start.sh`
+- `files/opt/serial2moon/` — the stack: `compose.yml`, `start.sh`
   (boot launcher), and `images/` (baked container tars).
 - `files/boot/serial2moon.conf` — user config copied to the boot partition.
 - `files/etc/systemd/system/serial2moon.service` — starts the stack at boot.
