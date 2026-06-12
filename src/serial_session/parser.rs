@@ -115,6 +115,52 @@ pub fn classify(raw: &str) -> Line {
     Line::Other(line.to_string())
 }
 
+/// Parse an `M115` reply into `(firmware_name, machine_type)`, e.g.
+/// `FIRMWARE_NAME:Prusa-Firmware 3.13.2 based on Marlin ... MACHINE_TYPE:Prusa i3 MK3S ...`.
+/// Returns None if the line isn't an M115 reply. `machine_type` is empty if not present.
+pub fn parse_firmware(line: &str) -> Option<(String, String)> {
+    if !line.contains("FIRMWARE_NAME:") {
+        return None;
+    }
+    // M115 is `KEY:value KEY:value ...` where values may contain spaces. Walk tokens,
+    // starting a new field on an uppercase `KEY:` token and appending the rest.
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut key: Option<String> = None;
+    let mut val = String::new();
+    let flush = |key: &mut Option<String>, val: &mut String, pairs: &mut Vec<_>| {
+        if let Some(k) = key.take() {
+            pairs.push((k, val.trim().to_string()));
+            val.clear();
+        }
+    };
+    for tok in line.split_whitespace() {
+        match tok.split_once(':') {
+            Some((k, v))
+                if !k.is_empty() && k.chars().all(|c| c.is_ascii_uppercase() || c == '_') =>
+            {
+                flush(&mut key, &mut val, &mut pairs);
+                key = Some(k.to_string());
+                val.push_str(v);
+            }
+            _ => {
+                if !val.is_empty() {
+                    val.push(' ');
+                }
+                val.push_str(tok);
+            }
+        }
+    }
+    flush(&mut key, &mut val, &mut pairs);
+
+    let find = |name: &str| {
+        pairs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    };
+    find("FIRMWARE_NAME").map(|fw| (fw, find("MACHINE_TYPE").unwrap_or_default()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +194,16 @@ mod tests {
             Line::Error(_)
         ));
         assert!(matches!(classify("ok"), Line::Ok(_)));
+    }
+
+    #[test]
+    fn parses_m115_firmware_and_machine() {
+        let line = "FIRMWARE_NAME:Prusa-Firmware 3.13.2 based on Marlin \
+                    FIRMWARE_URL:https://github.com/prusa3d PROTOCOL_VERSION:1.0 \
+                    MACHINE_TYPE:Prusa i3 MK3S EXTRUDER_COUNT:1 UUID:abc";
+        let (fw, machine) = parse_firmware(line).expect("should parse");
+        assert_eq!(fw, "Prusa-Firmware 3.13.2 based on Marlin");
+        assert_eq!(machine, "Prusa i3 MK3S");
+        assert!(parse_firmware("ok").is_none());
     }
 }

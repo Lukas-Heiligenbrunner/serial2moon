@@ -21,7 +21,7 @@ const HANDSHAKE_WINDOW: Duration = Duration::from_secs(8);
 /// Re-send M115 at least this often during the handshake.
 const M115_INTERVAL: Duration = Duration::from_millis(1200);
 
-pub async fn open(config: &Config) -> Result<Box<dyn Serial>> {
+pub async fn open(config: &Config) -> Result<(Box<dyn Serial>, u32)> {
     match config.serial_port.as_deref() {
         Some(port) => match config.baud {
             Some(baud) => connect(port, baud).await,
@@ -32,10 +32,10 @@ pub async fn open(config: &Config) -> Result<Box<dyn Serial>> {
 }
 
 /// Try every candidate baud on a single (explicit) port.
-async fn detect_on_port(port: &str) -> Result<Box<dyn Serial>> {
+async fn detect_on_port(port: &str) -> Result<(Box<dyn Serial>, u32)> {
     for &baud in CANDIDATE_BAUDS {
         match connect(port, baud).await {
-            Ok(stream) => return Ok(stream),
+            Ok(connected) => return Ok(connected),
             Err(e) => warn!(port, baud, error = %e, "no printer at this baud"),
         }
     }
@@ -44,7 +44,7 @@ async fn detect_on_port(port: &str) -> Result<Box<dyn Serial>> {
 
 /// No port configured: scan the connected serial devices and pick the first that
 /// handshakes as a Marlin printer.
-async fn autodetect(baud: Option<u32>) -> Result<Box<dyn Serial>> {
+async fn autodetect(baud: Option<u32>) -> Result<(Box<dyn Serial>, u32)> {
     let ports = candidate_ports();
     if ports.is_empty() {
         bail!("no serial devices present — is the printer connected?");
@@ -56,9 +56,9 @@ async fn autodetect(baud: Option<u32>) -> Result<Box<dyn Serial>> {
             None => detect_on_port(port).await,
         };
         match result {
-            Ok(stream) => {
+            Ok(connected) => {
                 info!(port, "selected printer");
-                return Ok(stream);
+                return Ok(connected);
             }
             Err(e) => warn!(port, error = %e, "no Marlin response; skipping"),
         }
@@ -71,8 +71,9 @@ async fn autodetect(baud: Option<u32>) -> Result<Box<dyn Serial>> {
 
 /// Open `port` at `baud`, ride through the connect-time reset, and confirm it's a printer
 /// by repeatedly sending M115 until it answers. On success the live, ready stream is
-/// returned (we do NOT reopen — that would reset the printer a second time).
-async fn connect(port: &str, baud: u32) -> Result<Box<dyn Serial>> {
+/// returned (we do NOT reopen — that would reset the printer a second time), along with
+/// the baud (used to compute serial-link utilization).
+async fn connect(port: &str, baud: u32) -> Result<(Box<dyn Serial>, u32)> {
     info!(port, baud, "probing serial");
     let mut stream = tokio_serial::new(port, baud)
         .timeout(Duration::from_millis(500))
@@ -81,7 +82,7 @@ async fn connect(port: &str, baud: u32) -> Result<Box<dyn Serial>> {
 
     if handshake(&mut stream).await? {
         info!(port, baud, "printer detected");
-        Ok(Box::new(stream))
+        Ok((Box::new(stream), baud))
     } else {
         bail!("no FIRMWARE_NAME reply within {HANDSHAKE_WINDOW:?}");
     }

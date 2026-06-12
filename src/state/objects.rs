@@ -103,6 +103,16 @@ pub struct PrinterState {
     pub extruder_max_temp: f64,
     pub bed_max_temp: f64,
     pub gcode_dir: String,
+
+    // MCU (the serial firmware) info + link stats, surfaced as the Klipper `mcu` object.
+    pub mcu_version: String,
+    pub machine_type: String,
+    pub mcu_bytes_read: u64,
+    pub mcu_bytes_write: u64,
+    pub mcu_send_seq: u64,
+    pub mcu_receive_seq: u64,
+    /// Serial-link utilization 0.0–1.0, surfaced as the MCU "load".
+    pub mcu_load: f64,
 }
 
 impl PrinterState {
@@ -154,6 +164,13 @@ impl PrinterState {
             extruder_max_temp,
             bed_max_temp,
             gcode_dir,
+            mcu_version: "unknown".to_string(),
+            machine_type: String::new(),
+            mcu_bytes_read: 0,
+            mcu_bytes_write: 0,
+            mcu_send_seq: 0,
+            mcu_receive_seq: 0,
+            mcu_load: 0.0,
         }
     }
 
@@ -247,6 +264,32 @@ impl PrinterState {
             json!({
                 "available_heaters": ["extruder", "heater_bed"],
                 "available_sensors": ["extruder", "heater_bed"],
+            }),
+        );
+
+        // The serial firmware presented as Klipper's `mcu` object, so it appears in
+        // Mainsail's Machine tab with its firmware version and link statistics.
+        m.insert(
+            "mcu".into(),
+            json!({
+                "mcu_version": self.mcu_version,
+                "mcu_build_versions": concat!("serial2moon v", env!("CARGO_PKG_VERSION")),
+                "mcu_constants": { "MCU": self.machine_type },
+                "last_stats": {
+                    // Mainsail's MCU "load" = mcu_task_avg + 3*mcu_task_stddev/0.0025 (capped
+                    // at 100%), computed only when both are non-zero. We put serial-link
+                    // utilization in mcu_task_avg with a tiny non-zero stddev so it renders.
+                    "mcu_awake": self.mcu_load * 5.0,
+                    "mcu_task_avg": self.mcu_load,
+                    "mcu_task_stddev": 0.000_001,
+                    "bytes_write": self.mcu_bytes_write,
+                    "bytes_read": self.mcu_bytes_read,
+                    "bytes_retransmit": 0,
+                    "bytes_invalid": 0,
+                    "send_seq": self.mcu_send_seq,
+                    "receive_seq": self.mcu_receive_seq,
+                    "freq": 16_000_000,
+                },
             }),
         );
 

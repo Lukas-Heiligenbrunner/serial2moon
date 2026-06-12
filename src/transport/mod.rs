@@ -14,10 +14,11 @@ use crate::config::{Config, TransportKind};
 pub trait Serial: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Serial for T {}
 
-/// Open the configured transport, returning a connected byte stream.
-pub async fn open(config: &Config) -> Result<Box<dyn Serial>> {
+/// Open the configured transport, returning a connected byte stream and the link baud
+/// (0 for the mock, which has no real line rate).
+pub async fn open(config: &Config) -> Result<(Box<dyn Serial>, u32)> {
     match config.transport {
-        TransportKind::Mock => Ok(mock::open()),
+        TransportKind::Mock => Ok((mock::open(), 0)),
         TransportKind::Serial => serial::open(config).await,
     }
 }

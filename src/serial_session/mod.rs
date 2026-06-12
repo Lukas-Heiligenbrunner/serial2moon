@@ -11,6 +11,7 @@
 pub mod motion;
 pub mod parser;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,16 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Shared "last byte received from the printer" timestamp, used to distinguish a busy
 /// printer (still streaming temps) from a hung/disconnected one.
 type LastSeen = Arc<Mutex<Instant>>;
+
+/// Serial link counters, surfaced as the Klipper `mcu` object's stats (bytes + sequence
+/// numbers ≈ commands sent / lines received).
+#[derive(Default)]
+struct Stats {
+    bytes_read: AtomicU64,
+    bytes_write: AtomicU64,
+    send_seq: AtomicU64,
+    receive_seq: AtomicU64,
+}
 
 struct Cmd {
     line: String,
@@ -122,7 +133,7 @@ async fn supervisor(
             s.state_message = "Connecting to printer".to_string();
         });
 
-        let transport = match transport::open(&config).await {
+        let (transport, baud) = match transport::open(&config).await {
             Ok(t) => t,
             Err(e) => {
                 warn!(error = %e, backoff = ?backoff, "failed to open printer; retrying");
@@ -142,6 +153,7 @@ async fn supervisor(
         backoff = BACKOFF_MIN;
         let end = run_connection(
             transport,
+            baud,
             &state,
             &console,
             &print,
@@ -192,6 +204,7 @@ async fn reject_for(
 
 async fn run_connection(
     transport: Box<dyn transport::Serial>,
+    baud: u32,
     state: &StateHandle,
     console: &broadcast::Sender<String>,
     print: &PrintHandle,
@@ -202,6 +215,7 @@ async fn run_connection(
     let (ack_tx, mut ack_rx) = mpsc::channel(64);
     let (restart_tx, mut restart_rx) = mpsc::unbounded_channel();
     let last_seen: LastSeen = Arc::new(Mutex::new(Instant::now()));
+    let stats = Arc::new(Stats::default());
 
     let reader = tokio::spawn(reader(
         read,
@@ -211,12 +225,51 @@ async fn run_connection(
         print.clone(),
         restart_tx,
         last_seen.clone(),
+        stats.clone(),
     ));
     tokio::pin!(reader);
 
+    // Publish MCU link stats to the state ~1/s (matches Klipper's cadence; avoids churn).
+    // Also derive a "load" = serial-link utilization (bytes/s vs the baud's byte capacity),
+    // since the real bottleneck on a legacy printer is the serial link, not MCU compute we
+    // can't see. ~10 bits per byte (8N1 + start/stop).
+    let stats_task = tokio::spawn({
+        let state = state.clone();
+        let stats = stats.clone();
+        let capacity = (baud as f64) / 10.0; // bytes/s, 0 for the mock
+        async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            let mut prev_total = 0u64;
+            loop {
+                tick.tick().await;
+                let bytes_read = stats.bytes_read.load(Ordering::Relaxed);
+                let bytes_write = stats.bytes_write.load(Ordering::Relaxed);
+                let send_seq = stats.send_seq.load(Ordering::Relaxed);
+                let receive_seq = stats.receive_seq.load(Ordering::Relaxed);
+
+                let total = bytes_read + bytes_write;
+                let per_sec = total.saturating_sub(prev_total) as f64; // interval is 1 s
+                prev_total = total;
+                let load = if capacity > 0.0 {
+                    (per_sec / capacity).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+
+                state.update(move |s| {
+                    s.mcu_bytes_read = bytes_read;
+                    s.mcu_bytes_write = bytes_write;
+                    s.mcu_send_seq = send_seq;
+                    s.mcu_receive_seq = receive_seq;
+                    s.mcu_load = load;
+                });
+            }
+        }
+    });
+
     // Initialize the printer for this connection: identify, enable temp autoreport.
-    let _ = send_and_wait(&mut write, "M115", &mut ack_rx, &last_seen).await;
-    let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx, &last_seen).await;
+    let _ = send_and_wait(&mut write, "M115", &mut ack_rx, &last_seen, &stats).await;
+    let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx, &last_seen, &stats).await;
     state.update(|s| {
         s.klippy_state = KlippyState::Ready;
         s.state_message = "Printer is ready".to_string();
@@ -232,13 +285,14 @@ async fn run_connection(
                 // Printer reset mid-session (watchdog/brownout): the link is still up, so
                 // re-initialize in place rather than reconnecting. Homing/position are lost.
                 warn!("re-initializing printer after reset");
-                let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx, &last_seen).await;
+                let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx, &last_seen, &stats).await;
                 motion = Motion::new();
                 push_motion(state, &motion);
             }
             cmd = recv_cmd(high_rx, low_rx) => {
                 let Some(cmd) = cmd else { break ConnectionEnd::Shutdown };
-                let result = send_and_wait(&mut write, &cmd.line, &mut ack_rx, &last_seen).await;
+                let result =
+                    send_and_wait(&mut write, &cmd.line, &mut ack_rx, &last_seen, &stats).await;
                 if result.is_ok() && motion.apply(&cmd.line) {
                     push_motion(state, &motion);
                 }
@@ -247,6 +301,7 @@ async fn run_connection(
         }
     };
 
+    stats_task.abort();
     if !matches!(end, ConnectionEnd::Disconnected) {
         reader.abort();
     }
@@ -302,6 +357,7 @@ fn apply_temps(state: &StateHandle, t: TempReport) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn reader<R: AsyncReadExt + Unpin>(
     read: R,
     state: StateHandle,
@@ -310,6 +366,7 @@ async fn reader<R: AsyncReadExt + Unpin>(
     print: PrintHandle,
     restart_tx: mpsc::UnboundedSender<()>,
     last_seen: LastSeen,
+    stats: Arc<Stats>,
 ) {
     let mut lines = BufReader::new(read).lines();
     loop {
@@ -317,6 +374,20 @@ async fn reader<R: AsyncReadExt + Unpin>(
             Ok(Some(raw)) => {
                 // Any line means the printer is alive — used to gate the command timeout.
                 *last_seen.lock().unwrap() = Instant::now();
+                stats
+                    .bytes_read
+                    .fetch_add(raw.len() as u64 + 1, Ordering::Relaxed);
+                stats.receive_seq.fetch_add(1, Ordering::Relaxed);
+                // Capture the printer's identity from its M115 reply.
+                if let Some((firmware, machine)) = parser::parse_firmware(&raw) {
+                    info!(%firmware, %machine, "printer identified");
+                    state.update(move |s| {
+                        s.mcu_version = firmware;
+                        if !machine.is_empty() {
+                            s.machine_type = machine;
+                        }
+                    });
+                }
                 match parser::classify(&raw) {
                     Line::Ok(t) => {
                         if !t.is_empty() {
@@ -372,11 +443,16 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
     line: &str,
     ack_rx: &mut mpsc::Receiver<AckEvent>,
     last_seen: &LastSeen,
+    stats: &Stats,
 ) -> Result<()> {
     // Discard any acks left over from a previous command before issuing this one.
     while ack_rx.try_recv().is_ok() {}
 
     write_line(write, line).await?;
+    stats
+        .bytes_write
+        .fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
+    stats.send_seq.fetch_add(1, Ordering::Relaxed);
 
     let mut resends = 0u32;
     loop {
