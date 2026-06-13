@@ -73,6 +73,14 @@ pub struct Config {
     /// `M850 S<id> A1`.
     #[arg(long, env = "S2M_SHEETS")]
     pub sheets: Option<String>,
+
+    /// On pause/cancel, lift the toolhead this many mm (0 disables). Restored on resume.
+    #[arg(long, env = "S2M_PAUSE_LIFT", default_value_t = 5.0)]
+    pub pause_z_lift: f64,
+
+    /// On pause/cancel, retract this many mm of filament (0 disables). Restored on resume.
+    #[arg(long, env = "S2M_PAUSE_RETRACT", default_value_t = 1.0)]
+    pub pause_retract: f64,
 }
 
 impl Config {

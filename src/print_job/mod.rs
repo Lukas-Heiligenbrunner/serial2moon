@@ -135,10 +135,12 @@ impl PrintHandle {
             }
             Ok(Outcome::Cancelled) => {
                 info!("print cancelled");
-                // Safety: drop heaters and fan when a print is aborted.
+                park(app).await; // lift + present (retract while still warm)
+                // Safety: drop heaters and fan, and release the steppers.
                 let _ = app.serial.send_high("M104 S0").await;
                 let _ = app.serial.send_high("M140 S0").await;
                 let _ = app.serial.send_high("M107").await;
+                let _ = app.serial.send_high("M84").await;
                 app.state.update(|s| {
                     s.print_state = PrintState::Cancelled;
                     s.sd_is_active = false;
@@ -172,6 +174,55 @@ fn strip_comment(raw: &str) -> &str {
     raw[..cut].trim()
 }
 
+/// Park the toolhead away from the print: retract, lift Z, and present the bed (Y front).
+/// Sent high-priority so it jumps ahead of the (paused) print feed.
+async fn park(app: &App) {
+    let lift = app.config.pause_z_lift;
+    let retract = app.config.pause_retract;
+    let park_y = app.config.axis_maximum()[1];
+
+    let _ = app.serial.send_high("M83").await; // relative extrusion for the retract
+    if retract > 0.0 {
+        let _ = app
+            .serial
+            .send_high(format!("G1 E-{retract:.2} F2400"))
+            .await;
+    }
+    let _ = app.serial.send_high("G91").await; // relative moves for the lift
+    if lift > 0.0 {
+        let _ = app.serial.send_high(format!("G1 Z{lift:.2} F600")).await;
+    }
+    let _ = app.serial.send_high("G90").await; // back to absolute
+    let _ = app
+        .serial
+        .send_high(format!("G1 X0 Y{park_y:.0} F3000"))
+        .await;
+}
+
+/// Reverse [`park`]: return to the saved position and unretract, restoring the E mode the
+/// print was using so the stream continues seamlessly.
+async fn unpark(app: &App, saved: [f64; 4], absolute_extrude: bool) {
+    let retract = app.config.pause_retract;
+    let [x, y, z, _] = saved;
+    let _ = app.serial.send_high("G90").await;
+    let _ = app
+        .serial
+        .send_high(format!("G1 X{x:.2} Y{y:.2} F3000"))
+        .await;
+    let _ = app.serial.send_high(format!("G1 Z{z:.2} F600")).await;
+    if retract > 0.0 {
+        let _ = app.serial.send_high("M83").await;
+        let _ = app
+            .serial
+            .send_high(format!("G1 E{retract:.2} F2400"))
+            .await;
+    }
+    let _ = app
+        .serial
+        .send_high(if absolute_extrude { "M82" } else { "M83" })
+        .await;
+}
+
 async fn stream_file(
     app: &App,
     path: &Path,
@@ -199,8 +250,26 @@ async fn stream_file(
                 PrintCmd::Cancel => return Ok(Outcome::Cancelled),
                 PrintCmd::Run => break,
                 PrintCmd::Pause => {
-                    if rx.changed().await.is_err() {
-                        return Ok(Outcome::Cancelled);
+                    // Save where we are, park away from the print, then wait for resume.
+                    let snap = app.state.snapshot();
+                    let saved = snap.position;
+                    let abs_e = snap.absolute_extrude;
+                    park(app).await;
+                    loop {
+                        if rx.changed().await.is_err() {
+                            return Ok(Outcome::Cancelled);
+                        }
+                        let next = *rx.borrow_and_update();
+                        match next {
+                            PrintCmd::Pause => continue,
+                            PrintCmd::Run => {
+                                unpark(app, saved, abs_e).await;
+                                break;
+                            }
+                            // Cancel/Abort while paused: leave it parked; finish() handles it.
+                            PrintCmd::Cancel => return Ok(Outcome::Cancelled),
+                            PrintCmd::Abort => return Ok(Outcome::Aborted),
+                        }
                     }
                 }
             }

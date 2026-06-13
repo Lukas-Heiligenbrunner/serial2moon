@@ -23,6 +23,8 @@ SERIAL_BAUD=""
 EXTRUDER_MAX_TEMP=300
 BED_MAX_TEMP=120
 SHEETS=""
+PAUSE_LIFT=""
+PAUSE_RETRACT=""
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && source "$CONF"
 
@@ -37,6 +39,8 @@ SHEETS=""
     [ -n "${SERIAL_DEVICE}" ] && echo "S2M_SERIAL_PORT=${SERIAL_DEVICE}"
     [ -n "${SERIAL_BAUD}" ] && echo "S2M_BAUD=${SERIAL_BAUD}"
     [ -n "${SHEETS}" ] && echo "S2M_SHEETS=${SHEETS}"
+    [ -n "${PAUSE_LIFT}" ] && echo "S2M_PAUSE_LIFT=${PAUSE_LIFT}"
+    [ -n "${PAUSE_RETRACT}" ] && echo "S2M_PAUSE_RETRACT=${PAUSE_RETRACT}"
 } >.env
 
 # 4) Start (idempotent; containers also auto-restart via 'restart: unless-stopped').
