@@ -381,6 +381,7 @@ async fn reader<R: AsyncReadExt + Unpin>(
                 // Capture the printer's identity from its M115 reply.
                 if let Some((firmware, machine)) = parser::parse_firmware(&raw) {
                     info!(%firmware, %machine, "printer identified");
+                    let _ = console.send(format!("// connected to {firmware}"));
                     state.update(move |s| {
                         s.mcu_version = firmware;
                         if !machine.is_empty() {
@@ -388,10 +389,32 @@ async fn reader<R: AsyncReadExt + Unpin>(
                         }
                     });
                 }
+                // React to host action commands from the printer's LCD (pause/resume/cancel
+                // a USB print). Errors (e.g. no active print) are ignored.
+                if let Some(action) = parser::parse_action(&raw) {
+                    match action.as_str() {
+                        "pause" | "paused" => {
+                            info!("printer requested pause");
+                            let _ = print.pause(&state).await;
+                        }
+                        "resume" | "resumed" => {
+                            info!("printer requested resume");
+                            let _ = print.resume(&state).await;
+                        }
+                        "cancel" => {
+                            info!("printer requested cancel");
+                            let _ = print.cancel().await;
+                        }
+                        _ => {}
+                    }
+                }
                 match parser::classify(&raw) {
                     Line::Ok(t) => {
                         if !t.is_empty() {
                             apply_temps(&state, t);
+                            // A solicited temp reply (M105) — echo to the console so it shows
+                            // on demand (Mainsail's "hide temperatures" toggle filters these).
+                            let _ = console.send(raw.trim().to_string());
                         }
                         let _ = ack_tx.send(AckEvent::Ok).await;
                     }

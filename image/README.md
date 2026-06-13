@@ -29,6 +29,11 @@ Mainsail's **Machine → Logfiles**.
 
 Targets **arm64** (Pi 3 / 4 / 5 / Zero 2 W).
 
+## Updating
+
+The serial2moon image is baked into the `.img` (it isn't pulled from a registry), so to
+update, **re-flash the latest released `.img`**.
+
 ## How it's built
 
 `../.github/workflows/image.yml` runs on a published release:

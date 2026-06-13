@@ -161,6 +161,15 @@ pub fn parse_firmware(line: &str) -> Option<(String, String)> {
     find("FIRMWARE_NAME").map(|fw| (fw, find("MACHINE_TYPE").unwrap_or_default()))
 }
 
+/// Parse a Marlin/Prusa host *action command* (sent when the printer's LCD is used during
+/// a USB print), e.g. `//action:pause`, `// action:cancel`. Returns the lower-cased action
+/// (`pause`/`resume`/`cancel`/…) or None.
+pub fn parse_action(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("//")?.trim_start();
+    rest.strip_prefix("action:")
+        .map(|cmd| cmd.trim().to_ascii_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +214,14 @@ mod tests {
         assert_eq!(fw, "Prusa-Firmware 3.13.2 based on Marlin");
         assert_eq!(machine, "Prusa i3 MK3S");
         assert!(parse_firmware("ok").is_none());
+    }
+
+    #[test]
+    fn parses_host_action_commands() {
+        assert_eq!(parse_action("//action:pause").as_deref(), Some("pause"));
+        assert_eq!(parse_action("// action:cancel").as_deref(), Some("cancel"));
+        assert_eq!(parse_action("//action:resume").as_deref(), Some("resume"));
+        assert_eq!(parse_action("echo:busy"), None);
+        assert_eq!(parse_action("// regular comment"), None);
     }
 }

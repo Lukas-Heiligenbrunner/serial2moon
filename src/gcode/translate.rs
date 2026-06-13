@@ -45,9 +45,12 @@ async fn execute_line(app: &App, line: &str) -> Result<()> {
                 return Err(e);
             }
         }
-        "PAUSE" => app.print.pause(app).await?,
-        "RESUME" => app.print.resume(app).await?,
-        "CANCEL_PRINT" => app.print.cancel(app).await?,
+        "PAUSE" => app.print.pause(&app.state).await?,
+        "RESUME" => app.print.resume(&app.state).await?,
+        "CANCEL_PRINT" => app.print.cancel().await?,
+
+        // ---- Console help ----
+        "HELP" => help(app),
 
         // ---- Emergency stop ----
         "M112" => emergency_stop(app).await?,
@@ -113,6 +116,24 @@ fn is_marlin_code(word: &str) -> bool {
     let mut chars = word.chars();
     matches!(chars.next(), Some('G') | Some('M') | Some('T'))
         && chars.next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// Print a summary of recognized commands to the console (Klipper's `HELP` equivalent).
+fn help(app: &App) {
+    const LINES: &[&str] = &[
+        "serial2moon bridge — recognized control commands:",
+        "  PAUSE / RESUME / CANCEL_PRINT          control the active print",
+        "  SDCARD_PRINT_FILE FILENAME=\"x.gcode\"   start a print",
+        "  SET_HEATER_TEMPERATURE HEATER=extruder|heater_bed TARGET=<C>",
+        "  TURN_OFF_HEATERS                       all heaters off",
+        "  SET_FAN_SPEED SPEED=<0..1>             part-cooling fan",
+        "  M112                                   emergency stop",
+        "Standard Marlin G-code (G0/G1/G28/M104/M105/M115/...) is sent to the printer.",
+        "Other Klipper macros are accepted and ignored.",
+    ];
+    for line in LINES {
+        let _ = app.console.send((*line).to_string());
+    }
 }
 
 async fn emergency_stop(app: &App) -> Result<()> {

@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use crate::app::App;
 use crate::config::TransportKind;
-use crate::state::PrintState;
+use crate::state::{PrintState, StateHandle};
 
 /// Don't bother sleeping for paces shorter than this (avoids thousands of sub-ms sleeps
 /// on large files); accumulate the budget and sleep in coarser chunks.
@@ -90,23 +90,23 @@ impl PrintHandle {
         Ok(())
     }
 
-    pub async fn pause(&self, app: &App) -> Result<()> {
+    pub async fn pause(&self, state: &StateHandle) -> Result<()> {
         let guard = self.active.lock().await;
         let tx = guard.as_ref().context("no active print to pause")?;
         let _ = tx.send(PrintCmd::Pause);
-        app.state.update(|s| s.print_state = PrintState::Paused);
+        state.update(|s| s.print_state = PrintState::Paused);
         Ok(())
     }
 
-    pub async fn resume(&self, app: &App) -> Result<()> {
+    pub async fn resume(&self, state: &StateHandle) -> Result<()> {
         let guard = self.active.lock().await;
         let tx = guard.as_ref().context("no active print to resume")?;
         let _ = tx.send(PrintCmd::Run);
-        app.state.update(|s| s.print_state = PrintState::Printing);
+        state.update(|s| s.print_state = PrintState::Printing);
         Ok(())
     }
 
-    pub async fn cancel(&self, _app: &App) -> Result<()> {
+    pub async fn cancel(&self) -> Result<()> {
         let guard = self.active.lock().await;
         let tx = guard.as_ref().context("no active print to cancel")?;
         let _ = tx.send(PrintCmd::Cancel);
