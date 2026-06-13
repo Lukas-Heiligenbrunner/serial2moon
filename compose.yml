@@ -11,6 +11,7 @@ services:
   serial2moon:
     build: .
     user: "1000:1000"
+    hostname: serial2moon # Mainsail shows this (Klipper printer.info.hostname) as the name
     depends_on:
       - moonraker            # let Moonraker initialize the shared volume first
     command:
@@ -37,6 +38,7 @@ services:
 
   moonraker:
     image: mkuf/moonraker:latest
+    hostname: serial2moon # shown as the printer name in Mainsail (vs the container id)
     volumes:
       - comms:/opt/printer_data/run
       - gcodes:/opt/printer_data/gcodes

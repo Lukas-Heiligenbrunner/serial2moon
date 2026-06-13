@@ -8,6 +8,9 @@
 services:
   serial2moon:
     image: serial2moon:bundled
+    # Mainsail shows Klipper's printer.info.hostname (this container's hostname) as the
+    # printer name; default it to the Pi's hostname (set by start.sh) vs the container id.
+    hostname: ${PRINTER_NAME:-serial2moon}
     depends_on:
       - moonraker # let Moonraker initialize the shared volumes first
     user: "1000:1000"
@@ -33,6 +36,9 @@ services:
 
   moonraker:
     image: mkuf/moonraker:latest
+    # Mainsail shows Moonraker's hostname as the printer name; default it to the Pi's
+    # hostname (set start.sh-side) instead of the random container id.
+    hostname: ${PRINTER_NAME:-serial2moon}
     volumes:
       - comms:/opt/printer_data/run
       - gcodes:/opt/printer_data/gcodes

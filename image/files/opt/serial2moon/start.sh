@@ -30,6 +30,8 @@ BED_MAX_TEMP=120
 {
     echo "S2M_EXTRUDER_MAX_TEMP=${EXTRUDER_MAX_TEMP}"
     echo "S2M_BED_MAX_TEMP=${BED_MAX_TEMP}"
+    # Shown as the printer name in Mainsail (Moonraker container hostname).
+    echo "PRINTER_NAME=$(hostname)"
     # /dev is bind-mounted whole, so the host device path is valid inside the container.
     [ -n "${SERIAL_DEVICE}" ] && echo "S2M_SERIAL_PORT=${SERIAL_DEVICE}"
     [ -n "${SERIAL_BAUD}" ] && echo "S2M_BAUD=${SERIAL_BAUD}"

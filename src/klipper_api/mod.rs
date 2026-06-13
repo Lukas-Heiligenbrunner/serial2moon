@@ -139,7 +139,9 @@ async fn console_pusher(
                 }
                 let template = guard.gcode_template.clone();
                 drop(guard);
-                let msg = with_params(template, json!([line]));
+                // Moonraker invokes process_gcode_response(response=...) via **params, so
+                // params MUST be a dict with "response" — a list silently drops the message.
+                let msg = with_params(template, json!({ "response": line }));
                 if out_tx.send(msg).await.is_err() {
                     break;
                 }
