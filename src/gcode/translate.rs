@@ -5,11 +5,11 @@
 //! Klipper API call returns and Moonraker never hangs. Unknown extended commands are
 //! acked-and-logged rather than dropped silently.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use tracing::{debug, info, warn};
 
 use crate::app::App;
-use crate::state::KlippyState;
+use crate::state::{KlippyState, sheet_macro_name};
 
 /// Run a (possibly multi-line) script to completion.
 pub async fn execute(app: &App, script: &str) -> Result<()> {
@@ -51,6 +51,10 @@ async fn execute_line(app: &App, line: &str) -> Result<()> {
 
         // ---- Console help ----
         "HELP" => help(app),
+
+        // ---- Steel-sheet profiles (Prusa M850) ----
+        "SHEET_INFO" => sheet_info(app).await?,
+        name if name.starts_with("SHEET_") => select_sheet(app, name).await?,
 
         // ---- Emergency stop ----
         "M112" => emergency_stop(app).await?,
@@ -134,6 +138,30 @@ fn help(app: &App) {
     for line in LINES {
         let _ = app.console.send((*line).to_string());
     }
+}
+
+/// Activate a configured steel sheet (Prusa `M850 S<id> A1`), applying its stored live-Z.
+async fn select_sheet(app: &App, macro_name: &str) -> Result<()> {
+    let sheets = app.state.snapshot().sheets.clone();
+    let id = sheets
+        .iter()
+        .find(|(_, label)| sheet_macro_name(label) == macro_name)
+        .map(|(id, _)| *id);
+    match id {
+        Some(id) => {
+            info!(macro_name, id, "selecting steel sheet");
+            app.serial.send_high(format!("M850 S{id} A1")).await
+        }
+        None => bail!("unknown steel sheet '{macro_name}'"),
+    }
+}
+
+/// Dump all sheet profiles (Prusa `M850 S0..S7`) to the console.
+async fn sheet_info(app: &App) -> Result<()> {
+    for id in 0..8 {
+        let _ = app.serial.send_high(format!("M850 S{id}")).await;
+    }
+    Ok(())
 }
 
 async fn emergency_stop(app: &App) -> Result<()> {

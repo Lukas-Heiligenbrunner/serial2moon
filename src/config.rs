@@ -67,9 +67,33 @@ pub struct Config {
     /// Pi image this points at Moonraker's logs dir so the log is downloadable in Mainsail.
     #[arg(long, env = "S2M_LOG_DIR")]
     pub log_dir: Option<PathBuf>,
+
+    /// Prusa steel-sheet profiles to expose as Mainsail buttons, as `id:Label` pairs
+    /// (id 0-7, the LCD order), e.g. "0:Smooth,1:Textured,2:Satin". Selecting one sends
+    /// `M850 S<id> A1`.
+    #[arg(long, env = "S2M_SHEETS")]
+    pub sheets: Option<String>,
 }
 
 impl Config {
+    /// Parse `sheets` ("id:Label,id:Label") into (id, label) pairs.
+    pub fn parsed_sheets(&self) -> Vec<(u8, String)> {
+        let mut out = Vec::new();
+        let Some(spec) = self.sheets.as_deref() else {
+            return out;
+        };
+        for part in spec.split(',') {
+            if let Some((id, label)) = part.trim().split_once(':')
+                && let Ok(id) = id.trim().parse::<u8>()
+                && id <= 7
+                && !label.trim().is_empty()
+            {
+                out.push((id, label.trim().to_string()));
+            }
+        }
+        out
+    }
+
     /// Parse `bed_size` ("x,y,z") into axis maxima.
     pub fn axis_maximum(&self) -> [f64; 4] {
         let mut out = [220.0, 220.0, 250.0, 0.0];

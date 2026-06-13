@@ -22,6 +22,7 @@ SERIAL_DEVICE=""
 SERIAL_BAUD=""
 EXTRUDER_MAX_TEMP=300
 BED_MAX_TEMP=120
+SHEETS=""
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && source "$CONF"
 
@@ -35,6 +36,7 @@ BED_MAX_TEMP=120
     # /dev is bind-mounted whole, so the host device path is valid inside the container.
     [ -n "${SERIAL_DEVICE}" ] && echo "S2M_SERIAL_PORT=${SERIAL_DEVICE}"
     [ -n "${SERIAL_BAUD}" ] && echo "S2M_BAUD=${SERIAL_BAUD}"
+    [ -n "${SHEETS}" ] && echo "S2M_SHEETS=${SHEETS}"
 } >.env
 
 # 4) Start (idempotent; containers also auto-restart via 'restart: unless-stopped').

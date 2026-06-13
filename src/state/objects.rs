@@ -103,6 +103,8 @@ pub struct PrinterState {
     pub extruder_max_temp: f64,
     pub bed_max_temp: f64,
     pub gcode_dir: String,
+    /// Configured steel-sheet profiles (id, label), exposed as selectable macros.
+    pub sheets: Vec<(u8, String)>,
 
     // MCU (the serial firmware) info + link stats, surfaced as the Klipper `mcu` object.
     pub mcu_version: String,
@@ -123,6 +125,7 @@ impl PrinterState {
         extruder_max_temp: f64,
         bed_max_temp: f64,
         gcode_dir: String,
+        sheets: Vec<(u8, String)>,
     ) -> Self {
         PrinterState {
             klippy_state: KlippyState::Startup,
@@ -171,6 +174,7 @@ impl PrinterState {
             mcu_send_seq: 0,
             mcu_receive_seq: 0,
             mcu_load: 0.0,
+            sheets,
         }
     }
 
@@ -344,7 +348,7 @@ impl PrinterState {
     /// The `configfile` object. Mainsail reads `settings.virtual_sdcard.path` to find
     /// the G-code directory, and the section presence to decide UI capabilities.
     fn configfile(&self) -> Value {
-        let settings = json!({
+        let mut settings = json!({
             "virtual_sdcard": { "path": self.gcode_dir },
             "printer": {
                 "kinematics": "cartesian",
@@ -367,14 +371,40 @@ impl PrinterState {
             "gcode_macro RESUME": { "rename_existing": "BASE_RESUME" },
             "gcode_macro CANCEL_PRINT": { "rename_existing": "BASE_CANCEL_PRINT" },
         });
+        // One selectable macro per configured steel sheet, plus a SHEET_INFO dump command.
+        if let Some(obj) = settings.as_object_mut() {
+            for (_, label) in &self.sheets {
+                obj.insert(
+                    format!("gcode_macro {}", sheet_macro_name(label)),
+                    json!({}),
+                );
+            }
+            if !self.sheets.is_empty() {
+                obj.insert("gcode_macro SHEET_INFO".to_string(), json!({}));
+            }
+        }
         json!({
-            "config": settings,
+            "config": settings.clone(),
             "settings": settings,
             "save_config_pending": false,
             "save_config_pending_items": {},
             "warnings": [],
         })
     }
+}
+
+/// Mainsail macro name for a steel-sheet label (sanitized + uppercased), e.g.
+/// "Smooth PEI" -> "SHEET_SMOOTH_PEI".
+pub fn sheet_macro_name(label: &str) -> String {
+    let mut s = String::from("SHEET_");
+    for c in label.chars() {
+        s.push(if c.is_ascii_alphanumeric() {
+            c.to_ascii_uppercase()
+        } else {
+            '_'
+        });
+    }
+    s
 }
 
 fn round2(v: f64) -> f64 {

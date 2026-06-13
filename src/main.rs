@@ -76,6 +76,7 @@ async fn main() -> Result<()> {
         config.extruder_max_temp,
         config.bed_max_temp,
         config.gcode_dir.to_string_lossy().to_string(),
+        config.parsed_sheets(),
     ));
 
     // Console (Marlin echo/error) fan-out.
