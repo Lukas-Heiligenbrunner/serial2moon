@@ -267,20 +267,33 @@ async fn run_connection(
         }
     });
 
-    // Initialize the printer for this connection: identify, enable temp autoreport, and
-    // discover steel-sheet profiles (the reader parses the M850 reports into state). Done
-    // before reporting ready so the sheet macros are present when Mainsail reads the config.
-    let _ = send_and_wait(&mut write, "M115", &mut ack_rx, &last_seen, &stats).await;
-    let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx, &last_seen, &stats).await;
+    // Line-number counter for the checksummed Marlin protocol. M110 N0 resets the
+    // printer's counter; framing then starts at N1. `init` does the reset + handshake.
+    let mut line_no: u64 = 0;
+    macro_rules! send {
+        ($cmd:expr) => {
+            send_and_wait(
+                &mut write,
+                $cmd,
+                &mut ack_rx,
+                &last_seen,
+                &stats,
+                &mut line_no,
+            )
+            .await
+        };
+    }
+
+    // Initialize the printer for this connection: reset line numbering, identify, enable
+    // temp autoreport, and discover steel-sheet profiles (the reader parses the M850
+    // reports into state). Done before reporting ready so the sheet macros are present
+    // when Mainsail reads the config. `line_no` starts at 0; M110 N0 resets the printer
+    // to match, so the first framed command after it is N1.
+    let _ = send!("M110 N0");
+    let _ = send!("M115");
+    let _ = send!("M155 S1");
     for id in 0..8 {
-        let _ = send_and_wait(
-            &mut write,
-            &format!("M850 S{id}"),
-            &mut ack_rx,
-            &last_seen,
-            &stats,
-        )
-        .await;
+        let _ = send!(&format!("M850 S{id}"));
     }
     state.update(|s| {
         s.klippy_state = KlippyState::Ready;
@@ -295,16 +308,18 @@ async fn run_connection(
             _ = &mut reader => break ConnectionEnd::Disconnected,
             _ = restart_rx.recv() => {
                 // Printer reset mid-session (watchdog/brownout): the link is still up, so
-                // re-initialize in place rather than reconnecting. Homing/position are lost.
+                // re-initialize in place rather than reconnecting. The printer's line counter
+                // reset too, so re-sync with M110. Homing/position are lost.
                 warn!("re-initializing printer after reset");
-                let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx, &last_seen, &stats).await;
+                line_no = 0;
+                let _ = send!("M110 N0");
+                let _ = send!("M155 S1");
                 motion = Motion::new();
                 push_motion(state, &motion);
             }
             cmd = recv_cmd(high_rx, low_rx) => {
                 let Some(cmd) = cmd else { break ConnectionEnd::Shutdown };
-                let result =
-                    send_and_wait(&mut write, &cmd.line, &mut ack_rx, &last_seen, &stats).await;
+                let result = send!(&cmd.line);
                 if result.is_ok() && motion.apply(&cmd.line) {
                     push_motion(state, &motion);
                 }
@@ -501,42 +516,66 @@ async fn reader<R: AsyncReadExt + Unpin>(
     }
 }
 
+/// Marlin line checksum: XOR of every byte up to (not including) the `*`.
+fn checksum(body: &str) -> u8 {
+    body.bytes().fold(0u8, |acc, b| acc ^ b)
+}
+
+/// Frame a command with a line number and checksum: `N<n> <cmd>*<checksum>`.
+fn frame(line_no: u64, cmd: &str) -> String {
+    let body = format!("N{line_no} {cmd}");
+    let cs = checksum(&body);
+    format!("{body}*{cs}")
+}
+
+/// Send a command with a line number + checksum and wait for `ok`, re-sending on `Resend:`
+/// and only advancing the line number on success. `line_no` is the number used for this
+/// command (set to 0 before an `M110 N0` reset).
 async fn send_and_wait<W: AsyncWriteExt + Unpin>(
     write: &mut W,
-    line: &str,
+    cmd: &str,
     ack_rx: &mut mpsc::Receiver<AckEvent>,
     last_seen: &LastSeen,
     stats: &Stats,
+    line_no: &mut u64,
 ) -> Result<()> {
     // Discard any acks left over from a previous command before issuing this one.
     while ack_rx.try_recv().is_ok() {}
 
-    write_line(write, line).await?;
+    let n = *line_no;
+    let framed = frame(n, cmd);
+    write_line(write, &framed).await?;
     stats
         .bytes_write
-        .fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
+        .fetch_add(framed.len() as u64 + 1, Ordering::Relaxed);
     stats.send_seq.fetch_add(1, Ordering::Relaxed);
 
     let mut resends = 0u32;
     loop {
         match timeout(POLL_INTERVAL, ack_rx.recv()).await {
-            Ok(Some(AckEvent::Ok)) => return Ok(()),
+            Ok(Some(AckEvent::Ok)) => {
+                *line_no = n + 1; // advance only once the printer accepted the line
+                return Ok(());
+            }
             Ok(Some(AckEvent::Busy)) => continue,
-            Ok(Some(AckEvent::Resend(n))) => {
+            Ok(Some(AckEvent::Resend(requested))) => {
                 resends += 1;
                 debug!(
-                    requested_line = n,
+                    requested,
+                    line_no = n,
                     attempt = resends,
                     "printer requested resend"
                 );
-                if resends > 5 {
-                    bail!("too many resend requests for line: {line}");
+                if resends > 10 {
+                    bail!("too many resend requests for line N{n}: {cmd}");
                 }
-                write_line(write, line).await?;
+                // Depth-1: the requested line is our in-flight one — resend it verbatim.
+                write_line(write, &framed).await?;
             }
             Ok(Some(AckEvent::Error(msg))) => {
                 // Non-fatal: logged to console already; treat as command completion.
                 debug!(error = %msg, "treating printer error as ack");
+                *line_no = n + 1;
                 return Ok(());
             }
             Ok(None) => bail!("serial reader stopped"),
@@ -546,7 +585,7 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
                 // silence (likely a hang/disconnect), not on elapsed time.
                 let idle = last_seen.lock().unwrap().elapsed();
                 if idle >= SILENCE_TIMEOUT {
-                    bail!("no response to '{line}' — printer silent for {idle:?}");
+                    bail!("no response to '{cmd}' — printer silent for {idle:?}");
                 }
             }
         }
@@ -559,4 +598,17 @@ async fn write_line<W: AsyncWriteExt + Unpin>(write: &mut W, line: &str) -> Resu
     write.write_all(b"\n").await?;
     write.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checksum, frame};
+
+    #[test]
+    fn marlin_checksum_and_frame() {
+        // Matches the canonical OctoPrint/Marlin `N0 M110 N0*125` reset line.
+        assert_eq!(checksum("N0 M110 N0"), 125);
+        assert_eq!(frame(0, "M110 N0"), "N0 M110 N0*125");
+        assert_eq!(frame(1, "M115"), format!("N1 M115*{}", checksum("N1 M115")));
+    }
 }

@@ -76,6 +76,29 @@ fn parse_axis(cmd: &str, axis: char) -> Option<f64> {
         .find_map(|tok| tok.strip_prefix(axis).and_then(|v| v.parse::<f64>().ok()))
 }
 
+/// Strip the Marlin `N<n> ` line-number prefix and `*<checksum>` suffix, leaving the bare
+/// command (a real printer does the same before parsing).
+fn strip_framing(s: &str) -> &str {
+    let s = s.trim();
+    let s = s.split('*').next().unwrap_or(s);
+    if let Some(rest) = s.strip_prefix('N') {
+        rest.trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start()
+    } else {
+        s
+    }
+}
+
+/// Extract the line number from a framed command (`N5 ...` -> 5).
+fn line_number(s: &str) -> Option<u64> {
+    s.trim()
+        .strip_prefix('N')?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
 async fn run<S: Serial>(stream: S) {
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
@@ -84,6 +107,10 @@ async fn run<S: Serial>(stream: S) {
     let mut ticker = interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut since_report = 0u64; // milliseconds since last autoreport
+
+    // Test hook: when set, request one resend to exercise the host's recovery path.
+    let force_resend = std::env::var("S2M_MOCK_FORCE_RESEND").is_ok();
+    let mut did_resend = false;
 
     // Marlin prints a banner on power-up.
     let _ = write.write_all(b"start\n").await;
@@ -102,10 +129,19 @@ async fn run<S: Serial>(stream: S) {
             }
             line = lines.next_line() => {
                 let Ok(Some(line)) = line else { break };
-                let cmd = line.trim();
-                if cmd.is_empty() { continue; }
-                let word = cmd.to_ascii_uppercase();
-                let word = word.split_whitespace().next().unwrap_or("");
+                let raw = line.trim();
+                if raw.is_empty() { continue; }
+
+                // Once, demand a resend of the first numbered command (no `ok`).
+                if force_resend && !did_resend && let Some(n) = line_number(raw) && n >= 1 {
+                    did_resend = true;
+                    let _ = write.write_all(format!("Resend: {n}\n").as_bytes()).await;
+                    continue;
+                }
+
+                let cmd = strip_framing(raw);
+                let upper = cmd.to_ascii_uppercase();
+                let word = upper.split_whitespace().next().unwrap_or("");
                 let reply = handle(cmd, &mut sim);
 
                 // Emulate the time slow commands take on a real machine. (Per-move pacing
