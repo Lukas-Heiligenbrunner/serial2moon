@@ -20,12 +20,14 @@ services:
       - "--gcode-dir=/opt/printer_data/gcodes"
     environment:
       - RUST_LOG=info
+      - S2M_CONFIG_FILE=/opt/printer_data/config/serial2moon.conf
     volumes:
       # Share exactly the comms (socket) and gcodes dirs with Moonraker. These paths
       # are declared as VOLUME in the Moonraker image, so they must be mounted
       # explicitly in BOTH services or the image's anonymous volumes shadow them.
       - comms:/opt/printer_data/run
       - gcodes:/opt/printer_data/gcodes
+      - config:/opt/printer_data/config
     restart: unless-stopped
     # ---- For a real printer instead of the mock, comment the mock command above and use: ----
     # command:
@@ -42,6 +44,7 @@ services:
     volumes:
       - comms:/opt/printer_data/run
       - gcodes:/opt/printer_data/gcodes
+      - config:/opt/printer_data/config
       - ./docker/moonraker.conf:/opt/printer_data/config/moonraker.conf:ro
     ports:
       - "7125:7125"
@@ -60,3 +63,4 @@ services:
 volumes:
   comms:
   gcodes:
+  config:

@@ -41,10 +41,10 @@ cp -r "$SRC/image/files/opt/serial2moon/." /opt/serial2moon/
 cp -r "$SRC/docker" /opt/serial2moon/docker
 chmod +x /opt/serial2moon/start.sh
 
-# Boot-partition config (editable from any PC after flashing).
+# serial2moon's settings file is created automatically in Moonraker's config dir on first
+# run and edited from Mainsail (Configuration Files) — nothing to place here.
 BOOTDIR=/boot/firmware
 [ -d "$BOOTDIR" ] || BOOTDIR=/boot
-cp "$SRC/image/files/boot/serial2moon.conf" "$BOOTDIR/serial2moon.conf"
 
 # Bring the stack up at boot. Enable Docker (+ containerd) and our service.
 cp "$SRC/image/files/etc/systemd/system/serial2moon.service" /etc/systemd/system/serial2moon.service

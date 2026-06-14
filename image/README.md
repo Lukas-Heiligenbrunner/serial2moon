@@ -15,14 +15,18 @@ serial2moon **autodetects** the printer among the connected USB serial devices �
 configuration needed in the common case. If no printer is found it reports an error and
 keeps retrying (there is no demo/mock mode in this image).
 
-Optional tuning in the boot partition's `serial2moon.conf` (then reboot or
-`sudo systemctl restart serial2moon`):
+Optional tuning lives in **`serial2moon.conf`**, editable right in **Mainsail → Machine →
+Configuration Files** (next to `moonraker.conf`). It's created automatically on first boot.
+After editing, **restart serial2moon** to apply (reboot, or `sudo systemctl restart serial2moon`):
 ```
-EXTRUDER_MAX_TEMP=300        # match your firmware; bounds the UI temp inputs
-BED_MAX_TEMP=120
-SERIAL_DEVICE=""             # pin a specific /dev/serial/by-id/... path (else autodetect)
-SERIAL_BAUD=""               # pin a baud (else autodetect via M115)
+RUST_LOG=info                # set "debug" to log every serial line + much more
+S2M_EXTRUDER_MAX_TEMP=300    # match your firmware; bounds the UI temp inputs
+S2M_BED_MAX_TEMP=120
+S2M_PAUSE_LIFT=5             # pause/cancel lift (mm); S2M_PAUSE_RETRACT for retract
+#S2M_SERIAL_PORT=...         # pin a /dev/serial/by-id/... path (else autodetect)
+#S2M_BAUD=115200             # pin a baud (else autodetect via M115)
 ```
+Steel sheets are auto-discovered from the printer (`M850`) and appear as macro buttons.
 
 Logs are written to Moonraker's logs dir, so `serial2moon.log` is downloadable from
 Mainsail's **Machine → Logfiles**.
@@ -51,7 +55,7 @@ update, **re-flash the latest released `.img`**.
 - `provision.sh` — runs inside the image at build time.
 - `files/opt/serial2moon/` — the stack: `compose.yml`, `start.sh`
   (boot launcher), and `images/` (baked container tars).
-- `files/boot/serial2moon.conf` — user config copied to the boot partition.
+- `serial2moon.conf` — created in Moonraker's config dir on first run, edited via Mainsail.
 - `files/etc/systemd/system/serial2moon.service` — starts the stack at boot.
 
 ## Build locally

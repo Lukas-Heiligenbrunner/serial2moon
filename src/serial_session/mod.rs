@@ -406,9 +406,11 @@ async fn reader<R: AsyncReadExt + Unpin>(
                         }
                     });
                 }
-                // Discover steel-sheet profiles from M850 reports (upsert by id).
-                if let Some((id, label, z)) = parser::parse_sheet(&raw) {
-                    debug!(id, %label, z, "discovered steel sheet");
+                // Discover steel-sheet profiles from M850 reports (upsert by id); show the
+                // active one in the status line (Mainsail can't highlight a macro button).
+                if let Some((id, label, z, active)) = parser::parse_sheet(&raw) {
+                    debug!(id, %label, z, active, "discovered steel sheet");
+                    let active_label = label.clone();
                     state.update(move |s| {
                         s.sheets.retain(|sh| sh.id != id);
                         s.sheets.push(crate::state::Sheet {
@@ -417,6 +419,9 @@ async fn reader<R: AsyncReadExt + Unpin>(
                             z: Some(z),
                         });
                         s.sheets.sort_by_key(|sh| sh.id);
+                        if active {
+                            s.display_message = format!("Active sheet: {active_label}");
+                        }
                     });
                 }
                 // React to host action commands from the printer's LCD (pause/resume/cancel

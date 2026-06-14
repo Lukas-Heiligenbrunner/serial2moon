@@ -52,9 +52,53 @@ fn init_logging(log_dir: Option<&Path>) -> Option<WorkerGuard> {
     guard
 }
 
+/// Default contents written to the editable config file when it doesn't exist yet.
+const DEFAULT_CONFIG: &str = "\
+# serial2moon configuration — editable from Mainsail (Machine -> Configuration Files).
+# Lines are KEY=VALUE; '#' starts a comment. After editing, RESTART serial2moon to apply
+# (reboot the Pi, or: sudo systemctl restart serial2moon).
+
+# Log verbosity: info (normal) or debug (logs every serial line sent/received + much more).
+RUST_LOG=info
+
+# Hotend / bed maximum temperature (C) — bounds the temperature inputs in the UI.
+S2M_EXTRUDER_MAX_TEMP=300
+S2M_BED_MAX_TEMP=120
+
+# Pause/cancel parking: lift the toolhead (mm) and retract filament (mm); 0 disables.
+S2M_PAUSE_LIFT=5
+S2M_PAUSE_RETRACT=1
+
+# Force a specific serial device / baud (otherwise both are autodetected):
+#S2M_SERIAL_PORT=/dev/serial/by-id/usb-Prusa_Research...-if00
+#S2M_BAUD=115200
+";
+
+/// Seed the editable config file with defaults if it doesn't exist yet (so it shows up in
+/// Mainsail for editing), then return its path for loading.
+fn seed_default_config(path: &str) {
+    let p = std::path::Path::new(path);
+    if p.exists() {
+        return;
+    }
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(p, DEFAULT_CONFIG) {
+        eprintln!("serial2moon: could not write default config {path}: {e}");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
+    // Load the editable config file (Moonraker's config dir on the Pi) before parsing, so
+    // its KEY=VALUE settings populate the environment. Values already set in the process
+    // environment (e.g. by compose) take precedence, so transport/paths stay locked.
+    if let Ok(path) = std::env::var("S2M_CONFIG_FILE") {
+        seed_default_config(&path);
+        let _ = dotenvy::from_path(std::path::Path::new(&path));
+    }
     let config = Config::parse();
     let _log_guard = init_logging(config.log_dir.as_deref());
     info!(transport = ?config.transport, socket = %config.uds_path.display(), "starting serial2moon");

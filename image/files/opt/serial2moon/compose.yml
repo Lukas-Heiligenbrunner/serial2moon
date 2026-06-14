@@ -16,17 +16,18 @@ services:
     user: "1000:1000"
     group_add:
       - "20" # 'dialout' gid on Raspberry Pi OS — needed to open the serial port
-    env_file:
-      - .env
     environment:
       - S2M_TRANSPORT=serial
       - S2M_UDS=/opt/printer_data/run/klippy.sock
       - S2M_GCODE_DIR=/opt/printer_data/gcodes
       - S2M_LOG_DIR=/opt/printer_data/logs
+      # Editable settings file, shown next to moonraker.conf in Mainsail's config editor.
+      - S2M_CONFIG_FILE=/opt/printer_data/config/serial2moon.conf
     volumes:
       - comms:/opt/printer_data/run
       - gcodes:/opt/printer_data/gcodes
       - logs:/opt/printer_data/logs
+      - config:/opt/printer_data/config
       - /dev:/dev # expose all serial devices (and survive hotplug/replug)
     device_cgroup_rules:
       - "c 188:* rmw" # USB serial (ttyUSB*)
@@ -42,6 +43,7 @@ services:
       - comms:/opt/printer_data/run
       - gcodes:/opt/printer_data/gcodes
       - logs:/opt/printer_data/logs
+      - config:/opt/printer_data/config
       - ./docker/moonraker.conf:/opt/printer_data/config/moonraker.conf:ro
     ports:
       - "7125:7125"
@@ -61,3 +63,4 @@ volumes:
   comms:
   gcodes:
   logs:
+  config:

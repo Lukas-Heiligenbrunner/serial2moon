@@ -362,9 +362,6 @@ impl PrinterState {
                 json!({}),
             );
         }
-        if !self.sheets.is_empty() {
-            m.insert("gcode_macro SHEET_INFO".into(), json!({}));
-        }
 
         m
     }
@@ -395,16 +392,13 @@ impl PrinterState {
             "gcode_macro RESUME": { "rename_existing": "BASE_RESUME" },
             "gcode_macro CANCEL_PRINT": { "rename_existing": "BASE_CANCEL_PRINT" },
         });
-        // One selectable macro per configured steel sheet, plus a SHEET_INFO dump command.
+        // One selectable macro per steel sheet (parameters/metadata for the buttons).
         if let Some(obj) = settings.as_object_mut() {
             for sheet in &self.sheets {
                 obj.insert(
                     format!("gcode_macro {}", sheet_macro_name(&sheet.label)),
                     json!({}),
                 );
-            }
-            if !self.sheets.is_empty() {
-                obj.insert("gcode_macro SHEET_INFO".to_string(), json!({}));
             }
         }
         json!({

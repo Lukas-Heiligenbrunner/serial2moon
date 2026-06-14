@@ -53,7 +53,6 @@ async fn execute_line(app: &App, line: &str) -> Result<()> {
         "HELP" => help(app),
 
         // ---- Steel-sheet profiles (Prusa M850) ----
-        "SHEET_INFO" => sheet_info(app).await?,
         name if name.starts_with("SHEET_") => select_sheet(app, name).await?,
 
         // ---- Emergency stop ----
@@ -154,18 +153,15 @@ async fn select_sheet(app: &App, macro_name: &str) -> Result<()> {
                 Some(z) => format!("M850 S{} Z{z:.4} A1", s.id),
                 None => format!("M850 S{} A1", s.id),
             };
-            app.serial.send_high(cmd).await
+            app.serial.send_high(cmd).await?;
+            // Reflect the selection in the status line (Mainsail can't highlight the button).
+            let label = s.label.clone();
+            app.state
+                .update(move |st| st.display_message = format!("Active sheet: {label}"));
+            Ok(())
         }
         None => bail!("unknown steel sheet '{macro_name}'"),
     }
-}
-
-/// Dump all sheet profiles (Prusa `M850 S0..S7`) to the console.
-async fn sheet_info(app: &App) -> Result<()> {
-    for id in 0..8 {
-        let _ = app.serial.send_high(format!("M850 S{id}")).await;
-    }
-    Ok(())
 }
 
 async fn emergency_stop(app: &App) -> Result<()> {
