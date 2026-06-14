@@ -73,11 +73,23 @@ enum ConnectionEnd {
     Disconnected,
 }
 
+/// A restart requested over the API (Klipper's `RESTART` / `FIRMWARE_RESTART`).
+#[derive(Clone, Copy, Debug)]
+enum RestartKind {
+    /// `RESTART`: re-initialize the printer over the existing link (reset line numbering,
+    /// re-run the handshake) — analogous to Klipper reloading config.
+    Reinit,
+    /// `FIRMWARE_RESTART`: drop and reopen the serial transport — analogous to Klipper
+    /// reconnecting to the MCU. Aborts any in-flight print.
+    Reconnect,
+}
+
 /// Handle for submitting G-code to the printer. Cheap to clone.
 #[derive(Clone)]
 pub struct SerialHandle {
     high: mpsc::Sender<Cmd>,
     low: mpsc::Sender<Cmd>,
+    restart: mpsc::Sender<RestartKind>,
 }
 
 impl SerialHandle {
@@ -89,6 +101,22 @@ impl SerialHandle {
     /// Submit a print-stream line (yields to interactive commands).
     pub async fn send_low(&self, line: impl Into<String>) -> Result<()> {
         Self::submit(&self.low, line.into()).await
+    }
+
+    /// Klipper `RESTART`: re-initialize the printer over the existing link.
+    pub async fn restart(&self) -> Result<()> {
+        self.restart
+            .send(RestartKind::Reinit)
+            .await
+            .map_err(|_| anyhow!("serial session closed"))
+    }
+
+    /// Klipper `FIRMWARE_RESTART`: drop and reopen the serial connection.
+    pub async fn firmware_restart(&self) -> Result<()> {
+        self.restart
+            .send(RestartKind::Reconnect)
+            .await
+            .map_err(|_| anyhow!("serial session closed"))
     }
 
     async fn submit(ch: &mpsc::Sender<Cmd>, line: String) -> Result<()> {
@@ -110,10 +138,14 @@ pub fn spawn(
 ) -> SerialHandle {
     let (high_tx, high_rx) = mpsc::channel(64);
     let (low_tx, low_rx) = mpsc::channel(1);
-    tokio::spawn(supervisor(config, state, console, print, high_rx, low_rx));
+    let (restart_tx, restart_rx) = mpsc::channel(4);
+    tokio::spawn(supervisor(
+        config, state, console, print, high_rx, low_rx, restart_rx,
+    ));
     SerialHandle {
         high: high_tx,
         low: low_tx,
+        restart: restart_tx,
     }
 }
 
@@ -125,6 +157,7 @@ async fn supervisor(
     print: PrintHandle,
     mut high_rx: mpsc::Receiver<Cmd>,
     mut low_rx: mpsc::Receiver<Cmd>,
+    mut restart_rx: mpsc::Receiver<RestartKind>,
 ) {
     let mut backoff = BACKOFF_MIN;
     loop {
@@ -159,6 +192,7 @@ async fn supervisor(
             &print,
             &mut high_rx,
             &mut low_rx,
+            &mut restart_rx,
         )
         .await;
         match end {
@@ -202,6 +236,7 @@ async fn reject_for(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_connection(
     transport: Box<dyn transport::Serial>,
     baud: u32,
@@ -210,6 +245,7 @@ async fn run_connection(
     print: &PrintHandle,
     high_rx: &mut mpsc::Receiver<Cmd>,
     low_rx: &mut mpsc::Receiver<Cmd>,
+    api_restart_rx: &mut mpsc::Receiver<RestartKind>,
 ) -> ConnectionEnd {
     let (read, mut write) = tokio::io::split(transport);
     let (ack_tx, mut ack_rx) = mpsc::channel(64);
@@ -317,6 +353,28 @@ async fn run_connection(
                 motion = Motion::new();
                 push_motion(state, &motion);
             }
+            Some(kind) = api_restart_rx.recv() => match kind {
+                // FIRMWARE_RESTART: tear the link down so the supervisor reopens the
+                // transport and runs a full handshake. The supervisor aborts the print.
+                RestartKind::Reconnect => {
+                    warn!("firmware restart requested; reconnecting transport");
+                    break ConnectionEnd::Disconnected;
+                }
+                // RESTART: re-initialize over the existing link, like the reset path above.
+                RestartKind::Reinit => {
+                    warn!("restart requested; re-initializing printer");
+                    print.abort().await;
+                    line_no = 0;
+                    let _ = send!("M110 N0");
+                    let _ = send!("M155 S1");
+                    motion = Motion::new();
+                    push_motion(state, &motion);
+                    state.update(|s| {
+                        s.klippy_state = KlippyState::Ready;
+                        s.state_message = "Printer is ready".to_string();
+                    });
+                }
+            },
             cmd = recv_cmd(high_rx, low_rx) => {
                 let Some(cmd) = cmd else { break ConnectionEnd::Shutdown };
                 let result = send!(&cmd.line);

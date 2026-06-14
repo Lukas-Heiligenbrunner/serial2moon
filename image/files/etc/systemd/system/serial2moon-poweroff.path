@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch for a serial2moon host-shutdown request
+Documentation=https://github.com/Lukas-Heiligenbrunner/serial2moon
+
+[Path]
+# serial2moon (in its container) drops this file when the HOST_SHUTDOWN macro runs.
+PathExists=/run/serial2moon/shutdown
+Unit=serial2moon-poweroff.service
+
+[Install]
+WantedBy=multi-user.target

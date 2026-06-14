@@ -52,6 +52,17 @@ enable_unit docker.service
 enable_unit containerd.service
 enable_unit serial2moon.service
 
+# Host power control: the HOST_REBOOT/HOST_SHUTDOWN macros (serial2moon, unprivileged in
+# its container) drop a request file into /run/serial2moon; these privileged host-side path
+# units watch for it and reboot/power off the Pi. This is the supported way to power-cycle
+# the host, since Moonraker refuses to reboot from inside a container.
+for unit in serial2moon-reboot.path serial2moon-reboot.service \
+    serial2moon-poweroff.path serial2moon-poweroff.service; do
+    cp "$SRC/image/files/etc/systemd/system/$unit" "/etc/systemd/system/$unit"
+done
+enable_unit serial2moon-reboot.path
+enable_unit serial2moon-poweroff.path
+
 # Enable SSH for headless debugging. The `ssh` flag on the boot partition is the canonical
 # Raspberry Pi OS way to start sshd at boot; we also enable the unit directly.
 # NOTE: a login user must still be set via Raspberry Pi Imager's OS customization (gear

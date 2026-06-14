@@ -73,7 +73,16 @@ async fn route(
             Ok(json!({}))
         }
         "gcode/help" => Ok(json!({})),
-        "gcode/restart" | "gcode/firmware_restart" => Ok(json!({})),
+        "gcode/restart" => {
+            info!("RESTART: re-initializing printer");
+            app.serial.restart().await?;
+            Ok(json!({}))
+        }
+        "gcode/firmware_restart" => {
+            info!("FIRMWARE_RESTART: reconnecting to printer");
+            app.serial.firmware_restart().await?;
+            Ok(json!({}))
+        }
         "register_remote_method" => {
             let name = params
                 .get("response_template")

@@ -1,0 +1,9 @@
+[Unit]
+Description=Reboot the host on a serial2moon request
+Documentation=https://github.com/Lukas-Heiligenbrunner/serial2moon
+
+[Service]
+Type=oneshot
+# Remove the request first so it can't re-trigger, then reboot the host.
+ExecStartPre=/bin/rm -f /run/serial2moon/reboot
+ExecStart=/usr/bin/systemctl reboot

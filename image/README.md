@@ -28,6 +28,16 @@ S2M_PAUSE_LIFT=5             # pause/cancel lift (mm); S2M_PAUSE_RETRACT for ret
 ```
 Steel sheets are auto-discovered from the printer (`M850`) and appear as macro buttons.
 
+**Restarting:**
+- **Restart / Firmware Restart** (the dropdown by the emergency-stop button) work as
+  expected: *Restart* re-initializes the printer over the existing link, *Firmware Restart*
+  drops and reopens the serial connection.
+- **Reboot / shut down the Pi:** use the **`HOST_REBOOT`** / **`HOST_SHUTDOWN`** macro
+  buttons. (Mainsail's own *Machine → Power* host buttons can't work here — Moonraker runs
+  in a container and refuses to reboot the host from inside one. serial2moon instead drops a
+  request that a privileged host-side systemd unit acts on.) Anyone with UI access can
+  trigger these, just like the physical power button.
+
 Logs are written to Moonraker's logs dir, so `serial2moon.log` is downloadable from
 Mainsail's **Machine → Logfiles**.
 

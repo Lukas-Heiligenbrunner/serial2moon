@@ -5,7 +5,7 @@
 //! Klipper API call returns and Moonraker never hangs. Unknown extended commands are
 //! acked-and-logged rather than dropped silently.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
 
 use crate::app::App;
@@ -48,6 +48,14 @@ async fn execute_line(app: &App, line: &str) -> Result<()> {
         "PAUSE" => app.print.pause(&app.state).await?,
         "RESUME" => app.print.resume(&app.state).await?,
         "CANCEL_PRINT" => app.print.cancel().await?,
+
+        // ---- Restart (also reachable via the gcode/restart API endpoints) ----
+        "RESTART" => app.serial.restart().await?,
+        "FIRMWARE_RESTART" => app.serial.firmware_restart().await?,
+
+        // ---- Host power control (handled by a host-side watcher; see config) ----
+        "HOST_REBOOT" => host_control(app, "reboot").await?,
+        "HOST_SHUTDOWN" => host_control(app, "shutdown").await?,
 
         // ---- Console help ----
         "HELP" => help(app),
@@ -162,6 +170,26 @@ async fn select_sheet(app: &App, macro_name: &str) -> Result<()> {
         }
         None => bail!("unknown steel sheet '{macro_name}'"),
     }
+}
+
+/// Request a host power action by dropping a marker file (`reboot`/`shutdown`) into the
+/// configured host-control dir, where a privileged host-side systemd path unit picks it up
+/// and runs `systemctl reboot`/`poweroff`. serial2moon itself is unprivileged and never
+/// touches the host directly.
+async fn host_control(app: &App, action: &str) -> Result<()> {
+    let Some(dir) = &app.config.host_control_dir else {
+        let _ = app
+            .console
+            .send("!! Host power control is not enabled on this install".into());
+        bail!("host control requested but S2M_HOST_CONTROL_DIR is unset");
+    };
+    let path = dir.join(action);
+    tokio::fs::write(&path, b"1")
+        .await
+        .with_context(|| format!("writing host-control request {}", path.display()))?;
+    info!(action, path = %path.display(), "host power request written");
+    let _ = app.console.send(format!("// Host {action} requested"));
+    Ok(())
 }
 
 async fn emergency_stop(app: &App) -> Result<()> {

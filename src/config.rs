@@ -81,6 +81,13 @@ pub struct Config {
     /// On pause/cancel, retract this many mm of filament (0 disables). Restored on resume.
     #[arg(long, env = "S2M_PAUSE_RETRACT", default_value_t = 1.0)]
     pub pause_retract: f64,
+
+    /// Directory to write host power-control requests into (a file named `reboot` or
+    /// `shutdown`). When set, the HOST_REBOOT / HOST_SHUTDOWN macros are exposed and a
+    /// host-side watcher (systemd path unit on the Pi) acts on the request. Unset (the
+    /// default) disables the feature — used by the mock/dev stack, which can't reboot a host.
+    #[arg(long, env = "S2M_HOST_CONTROL_DIR")]
+    pub host_control_dir: Option<PathBuf>,
 }
 
 impl Config {

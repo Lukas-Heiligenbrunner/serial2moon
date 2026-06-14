@@ -114,6 +114,9 @@ pub struct PrinterState {
     pub gcode_dir: String,
     /// Steel-sheet profiles (auto-discovered via M850 and/or configured), exposed as macros.
     pub sheets: Vec<Sheet>,
+    /// Whether host power control is available (a host-control dir is configured). When
+    /// true, the HOST_REBOOT / HOST_SHUTDOWN macros are exposed.
+    pub host_control: bool,
 
     // MCU (the serial firmware) info + link stats, surfaced as the Klipper `mcu` object.
     pub mcu_version: String,
@@ -127,6 +130,7 @@ pub struct PrinterState {
 }
 
 impl PrinterState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         axis_maximum: [f64; 4],
         max_velocity: f64,
@@ -135,6 +139,7 @@ impl PrinterState {
         bed_max_temp: f64,
         gcode_dir: String,
         sheets: Vec<(u8, String)>,
+        host_control: bool,
     ) -> Self {
         PrinterState {
             klippy_state: KlippyState::Startup,
@@ -187,6 +192,7 @@ impl PrinterState {
                 .into_iter()
                 .map(|(id, label)| Sheet { id, label, z: None })
                 .collect(),
+            host_control,
         }
     }
 
@@ -362,6 +368,11 @@ impl PrinterState {
                 json!({}),
             );
         }
+        // Host power-control macros (only when a host watcher is wired up).
+        if self.host_control {
+            m.insert("gcode_macro HOST_REBOOT".into(), json!({}));
+            m.insert("gcode_macro HOST_SHUTDOWN".into(), json!({}));
+        }
 
         m
     }
@@ -399,6 +410,10 @@ impl PrinterState {
                     format!("gcode_macro {}", sheet_macro_name(&sheet.label)),
                     json!({}),
                 );
+            }
+            if self.host_control {
+                obj.insert("gcode_macro HOST_REBOOT".into(), json!({}));
+                obj.insert("gcode_macro HOST_SHUTDOWN".into(), json!({}));
             }
         }
         json!({

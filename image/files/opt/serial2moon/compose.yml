@@ -23,12 +23,17 @@ services:
       - S2M_LOG_DIR=/opt/printer_data/logs
       # Editable settings file, shown next to moonraker.conf in Mainsail's config editor.
       - S2M_CONFIG_FILE=/opt/printer_data/config/serial2moon.conf
+      # Host power control: HOST_REBOOT/HOST_SHUTDOWN macros drop a request file here, which
+      # a privileged host-side systemd path unit acts on (Moonraker can't reboot from inside
+      # a container). The dir is a tmpfs bind mount, prepared by start.sh.
+      - S2M_HOST_CONTROL_DIR=/hostctl
     volumes:
       - comms:/opt/printer_data/run
       - gcodes:/opt/printer_data/gcodes
       - logs:/opt/printer_data/logs
       - config:/opt/printer_data/config
       - /dev:/dev # expose all serial devices (and survive hotplug/replug)
+      - /run/serial2moon:/hostctl # host power-control request drop (watched by host units)
     device_cgroup_rules:
       - "c 188:* rmw" # USB serial (ttyUSB*)
       - "c 166:* rmw" # USB CDC ACM (ttyACM*)

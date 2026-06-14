@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch for a serial2moon host-reboot request
+Documentation=https://github.com/Lukas-Heiligenbrunner/serial2moon
+
+[Path]
+# serial2moon (in its container) drops this file when the HOST_REBOOT macro runs.
+# /run is tmpfs, so a stale request can never survive a reboot into a boot loop.
+PathExists=/run/serial2moon/reboot
+Unit=serial2moon-reboot.service
+
+[Install]
+WantedBy=multi-user.target

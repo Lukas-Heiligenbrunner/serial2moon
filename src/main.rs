@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
         config.bed_max_temp,
         config.gcode_dir.to_string_lossy().to_string(),
         config.parsed_sheets(),
+        config.host_control_dir.is_some(),
     ));
 
     // Console (Marlin echo/error) fan-out.
