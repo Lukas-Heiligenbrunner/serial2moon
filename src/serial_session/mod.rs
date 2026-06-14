@@ -267,14 +267,26 @@ async fn run_connection(
         }
     });
 
-    // Initialize the printer for this connection: identify, enable temp autoreport.
+    // Initialize the printer for this connection: identify, enable temp autoreport, and
+    // discover steel-sheet profiles (the reader parses the M850 reports into state). Done
+    // before reporting ready so the sheet macros are present when Mainsail reads the config.
     let _ = send_and_wait(&mut write, "M115", &mut ack_rx, &last_seen, &stats).await;
     let _ = send_and_wait(&mut write, "M155 S1", &mut ack_rx, &last_seen, &stats).await;
+    for id in 0..8 {
+        let _ = send_and_wait(
+            &mut write,
+            &format!("M850 S{id}"),
+            &mut ack_rx,
+            &last_seen,
+            &stats,
+        )
+        .await;
+    }
     state.update(|s| {
         s.klippy_state = KlippyState::Ready;
         s.state_message = "Printer is ready".to_string();
     });
-    info!("printer initialized; reporting ready");
+    info!(sheets = ?state.snapshot().sheets.len(), "printer initialized; reporting ready");
 
     let mut motion = Motion::new();
     let end = loop {
@@ -369,24 +381,42 @@ async fn reader<R: AsyncReadExt + Unpin>(
     stats: Arc<Stats>,
 ) {
     let mut lines = BufReader::new(read).lines();
+    let mut identified = false;
     loop {
         match lines.next_line().await {
             Ok(Some(raw)) => {
+                debug!(target: "serial2moon::rx", "{}", raw.trim_end());
                 // Any line means the printer is alive — used to gate the command timeout.
                 *last_seen.lock().unwrap() = Instant::now();
                 stats
                     .bytes_read
                     .fetch_add(raw.len() as u64 + 1, Ordering::Relaxed);
                 stats.receive_seq.fetch_add(1, Ordering::Relaxed);
-                // Capture the printer's identity from its M115 reply.
+                // Capture the printer's identity from its M115 reply (once per connection).
                 if let Some((firmware, machine)) = parser::parse_firmware(&raw) {
-                    info!(%firmware, %machine, "printer identified");
-                    let _ = console.send(format!("// connected to {firmware}"));
+                    if !identified {
+                        identified = true;
+                        info!(%firmware, %machine, "printer identified");
+                        let _ = console.send(format!("// connected to {firmware}"));
+                    }
                     state.update(move |s| {
                         s.mcu_version = firmware;
                         if !machine.is_empty() {
                             s.machine_type = machine;
                         }
+                    });
+                }
+                // Discover steel-sheet profiles from M850 reports (upsert by id).
+                if let Some((id, label, z)) = parser::parse_sheet(&raw) {
+                    debug!(id, %label, z, "discovered steel sheet");
+                    state.update(move |s| {
+                        s.sheets.retain(|sh| sh.id != id);
+                        s.sheets.push(crate::state::Sheet {
+                            id,
+                            label,
+                            z: Some(z),
+                        });
+                        s.sheets.sort_by_key(|sh| sh.id);
                     });
                 }
                 // React to host action commands from the printer's LCD (pause/resume/cancel
@@ -444,8 +474,13 @@ async fn reader<R: AsyncReadExt + Unpin>(
                         let _ = restart_tx.send(());
                     }
                     Line::Other(msg) => {
-                        debug!(line = %msg, "printer output");
-                        let _ = console.send(msg);
+                        // Suppress M115 capability/firmware noise from the console (it's
+                        // parsed above and condensed into one "// connected" line).
+                        if msg.starts_with("Cap:") || msg.contains("FIRMWARE_NAME:") {
+                            debug!(line = %msg, "printer output (suppressed)");
+                        } else {
+                            let _ = console.send(msg);
+                        }
                     }
                 }
             }
@@ -514,6 +549,7 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
 }
 
 async fn write_line<W: AsyncWriteExt + Unpin>(write: &mut W, line: &str) -> Result<()> {
+    debug!(target: "serial2moon::tx", "{line}");
     write.write_all(line.as_bytes()).await?;
     write.write_all(b"\n").await?;
     write.flush().await?;

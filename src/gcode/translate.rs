@@ -140,17 +140,21 @@ fn help(app: &App) {
     }
 }
 
-/// Activate a configured steel sheet (Prusa `M850 S<id> A1`), applying its stored live-Z.
+/// Activate a steel sheet (Prusa `M850`), applying its stored live-Z. Includes the known
+/// Z so it's a definite "set + activate" (M850 only reports when Z/L are omitted).
 async fn select_sheet(app: &App, macro_name: &str) -> Result<()> {
     let sheets = app.state.snapshot().sheets.clone();
-    let id = sheets
+    let sheet = sheets
         .iter()
-        .find(|(_, label)| sheet_macro_name(label) == macro_name)
-        .map(|(id, _)| *id);
-    match id {
-        Some(id) => {
-            info!(macro_name, id, "selecting steel sheet");
-            app.serial.send_high(format!("M850 S{id} A1")).await
+        .find(|s| sheet_macro_name(&s.label) == macro_name);
+    match sheet {
+        Some(s) => {
+            info!(macro_name, id = s.id, z = ?s.z, "selecting steel sheet");
+            let cmd = match s.z {
+                Some(z) => format!("M850 S{} Z{z:.4} A1", s.id),
+                None => format!("M850 S{} A1", s.id),
+            };
+            app.serial.send_high(cmd).await
         }
         None => bail!("unknown steel sheet '{macro_name}'"),
     }

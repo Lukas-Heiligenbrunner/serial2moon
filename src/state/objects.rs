@@ -52,6 +52,15 @@ impl PrintState {
     }
 }
 
+/// A steel-sheet profile exposed as a selectable macro. `z` is the stored live-Z offset
+/// (None until discovered from the printer's `M850` report).
+#[derive(Debug, Clone)]
+pub struct Sheet {
+    pub id: u8,
+    pub label: String,
+    pub z: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PrinterState {
     pub klippy_state: KlippyState,
@@ -103,8 +112,8 @@ pub struct PrinterState {
     pub extruder_max_temp: f64,
     pub bed_max_temp: f64,
     pub gcode_dir: String,
-    /// Configured steel-sheet profiles (id, label), exposed as selectable macros.
-    pub sheets: Vec<(u8, String)>,
+    /// Steel-sheet profiles (auto-discovered via M850 and/or configured), exposed as macros.
+    pub sheets: Vec<Sheet>,
 
     // MCU (the serial firmware) info + link stats, surfaced as the Klipper `mcu` object.
     pub mcu_version: String,
@@ -174,7 +183,10 @@ impl PrinterState {
             mcu_send_seq: 0,
             mcu_receive_seq: 0,
             mcu_load: 0.0,
-            sheets,
+            sheets: sheets
+                .into_iter()
+                .map(|(id, label)| Sheet { id, label, z: None })
+                .collect(),
         }
     }
 
@@ -373,9 +385,9 @@ impl PrinterState {
         });
         // One selectable macro per configured steel sheet, plus a SHEET_INFO dump command.
         if let Some(obj) = settings.as_object_mut() {
-            for (_, label) in &self.sheets {
+            for sheet in &self.sheets {
                 obj.insert(
-                    format!("gcode_macro {}", sheet_macro_name(label)),
+                    format!("gcode_macro {}", sheet_macro_name(&sheet.label)),
                     json!({}),
                 );
             }

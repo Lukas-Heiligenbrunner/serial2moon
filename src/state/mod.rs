@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 
-pub use objects::{KlippyState, PrintState, PrinterState, sheet_macro_name};
+pub use objects::{KlippyState, PrintState, PrinterState, Sheet, sheet_macro_name};
 
 /// A mutation applied to the state by the actor.
 type Update = Box<dyn FnOnce(&mut PrinterState) + Send>;

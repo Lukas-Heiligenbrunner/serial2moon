@@ -25,12 +25,14 @@ BED_MAX_TEMP=120
 SHEETS=""
 PAUSE_LIFT=""
 PAUSE_RETRACT=""
+LOG_LEVEL="info"
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && source "$CONF"
 
 # 3) Generate .env (clap reads S2M_* from the env). Transport is fixed to serial in
 #    compose.yml; SERIAL_DEVICE/SERIAL_BAUD are optional pins (else auto).
 {
+    echo "RUST_LOG=${LOG_LEVEL:-info}"
     echo "S2M_EXTRUDER_MAX_TEMP=${EXTRUDER_MAX_TEMP}"
     echo "S2M_BED_MAX_TEMP=${BED_MAX_TEMP}"
     # Shown as the printer name in Mainsail (Moonraker container hostname).

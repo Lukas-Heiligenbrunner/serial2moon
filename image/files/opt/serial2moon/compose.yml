@@ -23,7 +23,6 @@ services:
       - S2M_UDS=/opt/printer_data/run/klippy.sock
       - S2M_GCODE_DIR=/opt/printer_data/gcodes
       - S2M_LOG_DIR=/opt/printer_data/logs
-      - RUST_LOG=info
     volumes:
       - comms:/opt/printer_data/run
       - gcodes:/opt/printer_data/gcodes

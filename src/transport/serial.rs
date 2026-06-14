@@ -17,7 +17,7 @@ const CANDIDATE_BAUDS: &[u32] = &[115200, 250000, 230400, 57600, 38400, 19200, 9
 /// How long to keep trying M115 on a freshly-opened port. Must exceed the printer's
 /// reset-and-boot time, since many boards (Prusa MK3, Arduino-based) reset on DTR when the
 /// port opens and can't answer for a few seconds.
-const HANDSHAKE_WINDOW: Duration = Duration::from_secs(8);
+const HANDSHAKE_WINDOW: Duration = Duration::from_secs(12);
 /// Re-send M115 at least this often during the handshake.
 const M115_INTERVAL: Duration = Duration::from_millis(1200);
 
@@ -81,6 +81,14 @@ async fn connect(port: &str, baud: u32) -> Result<(Box<dyn Serial>, u32)> {
         .with_context(|| format!("opening {port} at {baud}"))?;
 
     if handshake(&mut stream).await? {
+        // Flush any remaining buffered M115 replies (we sent M115 several times during the
+        // handshake) so the session reader doesn't forward duplicate banners to the console.
+        let mut buf = [0u8; 512];
+        while let Ok(Ok(n)) = timeout(Duration::from_millis(250), stream.read(&mut buf)).await {
+            if n == 0 {
+                break;
+            }
+        }
         info!(port, baud, "printer detected");
         Ok((Box::new(stream), baud))
     } else {

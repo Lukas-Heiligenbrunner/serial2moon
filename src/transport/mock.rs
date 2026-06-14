@@ -207,6 +207,14 @@ fn handle(cmd: &str, sim: &mut Sim) -> String {
             sim.pos[0], sim.pos[1], sim.pos[2], sim.pos[3]
         ),
         "M112" => "ok\n".to_string(),
+        "M850" => {
+            // Mimic Prusa's sheet report: sheets 0 and 1 calibrated, the rest uncalibrated.
+            match parse_axis(&upper, 'S').map(|v| v as u8) {
+                Some(0) | None => "Sheet 0 Z-1.0000 R-400 LSmooth B60 P0 A1\nok\n".to_string(),
+                Some(1) => "Sheet 1 Z-1.2000 R-480 LTextur B0 P0 A0\nok\n".to_string(),
+                Some(_) => "ok\n".to_string(),
+            }
+        }
         _ => "ok\n".to_string(),
     }
 }

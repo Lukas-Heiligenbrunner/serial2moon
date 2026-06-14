@@ -170,6 +170,27 @@ pub fn parse_action(line: &str) -> Option<String> {
         .map(|cmd| cmd.trim().to_ascii_lowercase())
 }
 
+/// Parse a Prusa `M850` sheet report into `(id, label, z_offset)`, e.g.
+/// `Sheet 0 Z-1.3150 R-526 LSmooth1 B60 P0 A0` -> `(0, "Smooth1", -1.315)`.
+/// Returns None for non-sheet lines or sheets without a usable label+offset (uncalibrated).
+pub fn parse_sheet(line: &str) -> Option<(u8, String, f64)> {
+    let rest = line.trim().strip_prefix("Sheet ")?;
+    let mut tokens = rest.split_whitespace();
+    let id: u8 = tokens.next()?.parse().ok()?;
+    let mut z = None;
+    let mut label = None;
+    for tok in tokens {
+        if let Some(v) = tok.strip_prefix('Z') {
+            z = v.parse::<f64>().ok();
+        } else if let Some(v) = tok.strip_prefix('L')
+            && !v.is_empty()
+        {
+            label = Some(v.to_string());
+        }
+    }
+    Some((id, label?, z?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +235,18 @@ mod tests {
         assert_eq!(fw, "Prusa-Firmware 3.13.2 based on Marlin");
         assert_eq!(machine, "Prusa i3 MK3S");
         assert!(parse_firmware("ok").is_none());
+    }
+
+    #[test]
+    fn parses_m850_sheet_report() {
+        let (id, label, z) = parse_sheet("Sheet 0 Z-1.3150 R-526 LSmooth1 B60 P0 A0").unwrap();
+        assert_eq!(id, 0);
+        assert_eq!(label, "Smooth1");
+        assert!((z - -1.315).abs() < 1e-6);
+        let (id, label, _) = parse_sheet("Sheet 2 Z-1.5500 R-620 LTextur1 B0 P0 A1").unwrap();
+        assert_eq!((id, label.as_str()), (2, "Textur1"));
+        assert!(parse_sheet("ok").is_none());
+        assert!(parse_sheet("Sheet 3 uncalibrated").is_none());
     }
 
     #[test]
