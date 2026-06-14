@@ -60,6 +60,11 @@ update, **re-flash the latest released `.img`**.
    installs the stack + `serial2moon.service`).
 3. Compresses and attaches `serial2moon-rpi-arm64.img.xz` to the release.
 
+A udev rule (`files/etc/udev/rules.d/99-serial2moon-latency.rules`) drops the USB-serial
+latency timer to 1 ms so dense G-code (curves) keeps the printer's planner fed. It applies
+to FTDI/CH340 adapters; CDC-ACM devices (e.g. Prusa native USB) have no such knob and are
+unaffected.
+
 ## Layout
 
 - `provision.sh` — runs inside the image at build time.

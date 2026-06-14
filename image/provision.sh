@@ -35,6 +35,11 @@ enable_unit() {
 # (symlink to /dev/null = masked, regardless of whether it's installed).
 ln -sf /dev/null /etc/systemd/system/ModemManager.service
 
+# Lower the USB-serial latency timer (FTDI/CH340 default to 16 ms) so the planner buffer
+# stays fed on dense G-code. Host-side udev rule; the container shares /dev and benefits.
+install -d /etc/udev/rules.d
+cp "$SRC/image/files/etc/udev/rules.d/99-serial2moon-latency.rules" /etc/udev/rules.d/
+
 # Install the stack.
 install -d /opt/serial2moon
 cp -r "$SRC/image/files/opt/serial2moon/." /opt/serial2moon/

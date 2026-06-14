@@ -2,6 +2,9 @@
 name = "serial2moon"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Bridge that runs Klipper web frontends (Mainsail/Fluidd) on a legacy Marlin printer over USB serial"
+repository = "https://github.com/Lukas-Heiligenbrunner/serial2moon"
 
 [dependencies]
 anyhow = "1.0.102"

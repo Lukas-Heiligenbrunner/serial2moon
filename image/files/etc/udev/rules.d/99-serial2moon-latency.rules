@@ -1,0 +1,8 @@
+# Lower the USB-serial latency timer so the printer's motion planner stays fed on dense
+# G-code (curves, small segments). FTDI/CH340-style adapters default to a 16 ms timer,
+# which caps the depth-1 handshake at ~60 commands/s and can starve the planner.
+#
+# Set on the host (udev runs host-side); the serial2moon container shares /dev, so it
+# benefits automatically. Devices without this attribute — e.g. CDC-ACM (Prusa native
+# USB) — simply don't match the ATTR write, so the rule is a harmless no-op there.
+ACTION=="add|change", SUBSYSTEM=="usb-serial", ATTR{latency_timer}="1"
