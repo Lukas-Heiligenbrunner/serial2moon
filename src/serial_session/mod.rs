@@ -32,8 +32,15 @@ use parser::{Line, TempReport};
 /// Blocking G-code (M109/M190 heat waits, G28/G29) can take minutes, but the printer keeps
 /// streaming temperature lines meanwhile — so we time out on silence, not on elapsed time.
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
-/// How often the command wait wakes to check for silence.
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// For a *non-blocking* command, if no `ok` arrives within this long while the printer is
+/// otherwise alive (still streaming temps), the `ok` was almost certainly lost on the wire —
+/// a depth-1 deadlock (we await an `ok` that never comes; the printer awaits the next line).
+/// We re-send the line to break it; line numbers make that safe (Marlin re-acks or asks for
+/// the next line). Must comfortably exceed the worst-case delayed-`ok` from a full planner
+/// buffer of slow moves, so it never fires spuriously mid-print.
+const ACK_TIMEOUT: Duration = Duration::from_secs(8);
+/// How often the command wait wakes to check the timeouts above.
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Reconnect backoff bounds.
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -588,9 +595,28 @@ fn frame(line_no: u64, cmd: &str) -> String {
     format!("{body}*{cs}")
 }
 
+/// Commands that legitimately produce no `ok` for a long time (seconds to minutes) while the
+/// printer streams only temperatures: heat waits, homing/leveling, dwell, move sync, pauses.
+/// For these we must NOT use the lost-`ok` resend timeout (it would re-issue the command
+/// mid-wait); we fall back to the long silence timeout instead.
+fn is_blocking_command(cmd: &str) -> bool {
+    let word = cmd
+        .split([' ', '\t'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    matches!(
+        word.as_str(),
+        "M109" | "M190" | "M191" | "M116" // wait for temperature
+            | "G28" | "G29"               // home / bed leveling
+            | "G4" | "M400"               // dwell / wait for moves to finish
+            | "M226" | "M0" | "M1" | "M600" // wait for pin / pause / filament change
+    )
+}
+
 /// Send a command with a line number + checksum and wait for `ok`, re-sending on `Resend:`
-/// and only advancing the line number on success. `line_no` is the number used for this
-/// command (set to 0 before an `M110 N0` reset).
+/// (or a lost `ok`) and only advancing the line number on success. `line_no` is the number
+/// used for this command (set to 0 before an `M110 N0` reset).
 async fn send_and_wait<W: AsyncWriteExt + Unpin>(
     write: &mut W,
     cmd: &str,
@@ -604,33 +630,42 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
 
     let n = *line_no;
     let framed = frame(n, cmd);
-    write_line(write, &framed).await?;
-    stats
-        .bytes_write
-        .fetch_add(framed.len() as u64 + 1, Ordering::Relaxed);
-    stats.send_seq.fetch_add(1, Ordering::Relaxed);
+    let blocking = is_blocking_command(cmd);
+    send_framed(write, &framed, stats).await?;
 
     let mut resends = 0u32;
+    // When we last (re)sent the line — used to detect a lost `ok` on non-blocking commands.
+    let mut sent_at = Instant::now();
     loop {
         match timeout(POLL_INTERVAL, ack_rx.recv()).await {
             Ok(Some(AckEvent::Ok)) => {
                 *line_no = n + 1; // advance only once the printer accepted the line
                 return Ok(());
             }
-            Ok(Some(AckEvent::Busy)) => continue,
+            // `busy:` means the printer is actively working (e.g. planner full on slow moves)
+            // — real progress, so reset the lost-`ok` timer rather than resending into it.
+            Ok(Some(AckEvent::Busy)) => {
+                sent_at = Instant::now();
+            }
             Ok(Some(AckEvent::Resend(requested))) => {
+                // `Resend: R` means "the next line I expect is R". If R is past our line, the
+                // printer already has N (our `ok` was lost) — treat N as accepted and advance.
+                if requested > n {
+                    debug!(
+                        requested,
+                        line_no = n,
+                        "printer already has line; advancing"
+                    );
+                    *line_no = n + 1;
+                    return Ok(());
+                }
                 resends += 1;
-                debug!(
-                    requested,
-                    line_no = n,
-                    attempt = resends,
-                    "printer requested resend"
-                );
+                debug!(requested, line_no = n, attempt = resends, "resending line");
                 if resends > 10 {
                     bail!("too many resend requests for line N{n}: {cmd}");
                 }
-                // Depth-1: the requested line is our in-flight one — resend it verbatim.
-                write_line(write, &framed).await?;
+                send_framed(write, &framed, stats).await?;
+                sent_at = Instant::now();
             }
             Ok(Some(AckEvent::Error)) => {
                 // Do NOT treat an error as an ack (it was already logged by the reader).
@@ -644,16 +679,42 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
             }
             Ok(None) => bail!("serial reader stopped"),
             Err(_) => {
-                // No ack yet. Blocking commands (M109/M190/G28/G29) can run for minutes,
-                // but the printer keeps streaming temps meanwhile — so only fail on real
-                // silence (likely a hang/disconnect), not on elapsed time.
+                // Hard backstop: nothing at all from the printer for a long time → it hung or
+                // the link dropped. (Blocking commands keep streaming temps, so this won't
+                // fire while they run.)
                 let idle = last_seen.lock().unwrap().elapsed();
                 if idle >= SILENCE_TIMEOUT {
                     bail!("no response to '{cmd}' — printer silent for {idle:?}");
                 }
+                // Lost-`ok` recovery: the printer is alive (temps still arriving) but a
+                // non-blocking command has gone unacked far longer than any planner-full
+                // delay. The `ok` was almost certainly dropped → depth-1 deadlock. Re-send
+                // the line; the printer re-acks it or answers `Resend: N+1` (handled above).
+                if !blocking && sent_at.elapsed() >= ACK_TIMEOUT {
+                    resends += 1;
+                    warn!(line_no = n, attempt = resends, %cmd, "no ok in time; re-sending (lost ok?)");
+                    if resends > 10 {
+                        bail!("no ok after {resends} re-sends for line N{n}: {cmd}");
+                    }
+                    send_framed(write, &framed, stats).await?;
+                    sent_at = Instant::now();
+                }
             }
         }
     }
+}
+
+/// Write one framed line and account for it in the link stats.
+async fn send_framed<W: AsyncWriteExt + Unpin>(
+    write: &mut W,
+    framed: &str,
+    stats: &Stats,
+) -> Result<()> {
+    stats
+        .bytes_write
+        .fetch_add(framed.len() as u64 + 1, Ordering::Relaxed);
+    stats.send_seq.fetch_add(1, Ordering::Relaxed);
+    write_line(write, framed).await
 }
 
 async fn write_line<W: AsyncWriteExt + Unpin>(write: &mut W, line: &str) -> Result<()> {

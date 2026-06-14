@@ -112,6 +112,11 @@ async fn run<S: Serial>(stream: S) {
     let force_resend = std::env::var("S2M_MOCK_FORCE_RESEND").is_ok();
     let mut did_resend = false;
 
+    // Test hook: when set, swallow the `ok` for one command (simulating an `ok` lost on the
+    // wire), then answer the host's eventual re-send with `Resend: N+1` ("I already have N").
+    let drop_ok = std::env::var("S2M_MOCK_DROP_OK").is_ok();
+    let mut dropped: Option<u64> = None;
+
     // Marlin prints a banner on power-up.
     let _ = write.write_all(b"start\n").await;
 
@@ -145,6 +150,26 @@ async fn run<S: Serial>(stream: S) {
                         .await;
                     let _ = write.write_all(format!("Resend: {n}\n").as_bytes()).await;
                     continue;
+                }
+
+                // Simulate a lost `ok`: process one command but send its reply WITHOUT the
+                // trailing `ok`; on the host's re-send of that line, report `Resend: N+1`.
+                if drop_ok && let Some(n) = line_number(raw) {
+                    if dropped == Some(n) {
+                        let _ = write.write_all(format!("Resend: {}\n", n + 1).as_bytes()).await;
+                        continue;
+                    }
+                    if dropped.is_none() && n >= 1 {
+                        dropped = Some(n);
+                        let reply = handle(strip_framing(raw), &mut sim);
+                        let body: String = reply
+                            .lines()
+                            .filter(|l| l.trim() != "ok")
+                            .map(|l| format!("{l}\n"))
+                            .collect();
+                        let _ = write.write_all(body.as_bytes()).await;
+                        continue;
+                    }
                 }
 
                 let cmd = strip_framing(raw);
