@@ -19,7 +19,7 @@ services:
       - "--uds-path=/opt/printer_data/run/klippy.sock"
       - "--gcode-dir=/opt/printer_data/gcodes"
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=info,serial2moon=debug
       - S2M_CONFIG_FILE=/opt/printer_data/config/serial2moon.conf
     volumes:
       # Share exactly the comms (socket) and gcodes dirs with Moonraker. These paths

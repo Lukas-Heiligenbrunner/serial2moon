@@ -19,7 +19,7 @@ Optional tuning lives in **`serial2moon.conf`**, editable right in **Mainsail â†
 Configuration Files** (next to `moonraker.conf`). It's created automatically on first boot.
 After editing, **restart serial2moon** to apply (reboot, or `sudo systemctl restart serial2moon`):
 ```
-RUST_LOG=info                # set "debug" to log every serial line + much more
+RUST_LOG=info,serial2moon=debug   # default: every serial line + diagnostics. "info" = quieter
 S2M_EXTRUDER_MAX_TEMP=300    # match your firmware; bounds the UI temp inputs
 S2M_BED_MAX_TEMP=120
 S2M_PAUSE_LIFT=5             # pause/cancel lift (mm); S2M_PAUSE_RETRACT for retract

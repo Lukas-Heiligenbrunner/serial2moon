@@ -29,7 +29,10 @@ use state::{PrinterState, StateHandle};
 /// Set up logging to stdout and, when `log_dir` is set, additionally to
 /// `<log_dir>/serial2moon.log`. Returns the appender guard, which must be kept alive.
 fn init_logging(log_dir: Option<&Path>) -> Option<WorkerGuard> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Default to debug for our own crate (every serial line + full diagnostics) but info for
+    // dependencies (no hyper/tokio/mio spam). Override wholesale with RUST_LOG.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,serial2moon=debug"));
 
     let (file_layer, guard) = match log_dir {
         Some(dir) => {
@@ -58,8 +61,9 @@ const DEFAULT_CONFIG: &str = "\
 # Lines are KEY=VALUE; '#' starts a comment. After editing, RESTART serial2moon to apply
 # (reboot the Pi, or: sudo systemctl restart serial2moon).
 
-# Log verbosity: info (normal) or debug (logs every serial line sent/received + much more).
-RUST_LOG=info
+# Log verbosity. Default logs every serial line sent/received + much more. Set to plain
+# 'info' for a quieter log, or 'debug' to also include (noisy) dependency logs.
+RUST_LOG=info,serial2moon=debug
 
 # Hotend / bed maximum temperature (C) — bounds the temperature inputs in the UI.
 S2M_EXTRUDER_MAX_TEMP=300

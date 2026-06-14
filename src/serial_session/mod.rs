@@ -62,7 +62,9 @@ enum AckEvent {
     Ok,
     Busy,
     Resend(u64),
-    Error(String),
+    /// The printer rejected/erred on a command. The message is logged by the reader; the
+    /// supervisor only needs to know an error occurred (it keeps waiting for `ok`/`Resend`).
+    Error,
 }
 
 /// How a single connection ended.
@@ -536,7 +538,7 @@ async fn reader<R: AsyncReadExt + Unpin>(
                     Line::Error(msg) => {
                         warn!(error = %msg, "printer reported error");
                         let _ = console.send(format!("!! {msg}"));
-                        let _ = ack_tx.send(AckEvent::Error(msg)).await;
+                        let _ = ack_tx.send(AckEvent::Error).await;
                     }
                     Line::Echo(msg) => {
                         let _ = console.send(format!("// {msg}"));
@@ -630,11 +632,15 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
                 // Depth-1: the requested line is our in-flight one — resend it verbatim.
                 write_line(write, &framed).await?;
             }
-            Ok(Some(AckEvent::Error(msg))) => {
-                // Non-fatal: logged to console already; treat as command completion.
-                debug!(error = %msg, "treating printer error as ack");
-                *line_no = n + 1;
-                return Ok(());
+            Ok(Some(AckEvent::Error)) => {
+                // Do NOT treat an error as an ack (it was already logged by the reader).
+                // A checksum / line-number error is emitted as `Error: ...` *followed by*
+                // `Resend: N`; with the line-numbered protocol, falsely completing here
+                // would advance the counter past a line the printer rejected, permanently
+                // desyncing it (every later line then mismatches → the print silently
+                // stalls). So keep waiting: a recoverable error is followed by the real
+                // `ok` or a `Resend`, and a fatal one stops the temp stream → silence bail.
+                continue;
             }
             Ok(None) => bail!("serial reader stopped"),
             Err(_) => {

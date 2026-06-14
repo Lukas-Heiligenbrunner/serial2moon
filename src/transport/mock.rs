@@ -132,9 +132,17 @@ async fn run<S: Serial>(stream: S) {
                 let raw = line.trim();
                 if raw.is_empty() { continue; }
 
-                // Once, demand a resend of the first numbered command (no `ok`).
+                // Once, reject the first numbered command the way Prusa/Marlin does on a
+                // corrupted line: an `Error:` line *followed by* `Resend: N`, with no `ok`.
+                // This exercises the host's recovery (and that it does NOT treat the error
+                // as an ack, which would desync the line counter).
                 if force_resend && !did_resend && let Some(n) = line_number(raw) && n >= 1 {
                     did_resend = true;
+                    let _ = write
+                        .write_all(
+                            format!("Error:checksum mismatch, Last Line: {}\n", n - 1).as_bytes(),
+                        )
+                        .await;
                     let _ = write.write_all(format!("Resend: {n}\n").as_bytes()).await;
                     continue;
                 }

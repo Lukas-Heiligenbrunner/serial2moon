@@ -23,6 +23,9 @@ const ENDPOINTS: &[&str] = &[
     "gcode/subscribe_output",
     "gcode/restart",
     "gcode/firmware_restart",
+    "pause_resume/pause",
+    "pause_resume/resume",
+    "pause_resume/cancel",
     "register_remote_method",
     "emergency_stop",
     "list_endpoints",
@@ -73,6 +76,20 @@ async fn route(
             Ok(json!({}))
         }
         "gcode/help" => Ok(json!({})),
+        // Moonraker drives pause/resume/cancel through these Klipper endpoints (registered
+        // by Klipper's pause_resume module), not the PAUSE/RESUME/CANCEL_PRINT g-code.
+        "pause_resume/pause" => {
+            app.print.pause(&app.state).await?;
+            Ok(json!({}))
+        }
+        "pause_resume/resume" => {
+            app.print.resume(&app.state).await?;
+            Ok(json!({}))
+        }
+        "pause_resume/cancel" => {
+            app.print.cancel().await?;
+            Ok(json!({}))
+        }
         "gcode/restart" => {
             info!("RESTART: re-initializing printer");
             app.serial.restart().await?;
