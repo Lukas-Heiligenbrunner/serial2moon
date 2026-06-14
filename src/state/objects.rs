@@ -354,6 +354,18 @@ impl PrinterState {
 
         m.insert("configfile".into(), self.configfile());
 
+        // Expose the sheet macros as printer objects too — Mainsail builds its macro list
+        // (the buttons) from objects named `gcode_macro <name>`, not from the configfile.
+        for sheet in &self.sheets {
+            m.insert(
+                format!("gcode_macro {}", sheet_macro_name(&sheet.label)),
+                json!({}),
+            );
+        }
+        if !self.sheets.is_empty() {
+            m.insert("gcode_macro SHEET_INFO".into(), json!({}));
+        }
+
         m
     }
 
