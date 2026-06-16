@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::print_job::PrintHandle;
-use crate::state::{KlippyState, StateHandle};
+use crate::state::{KlippyState, PrintState, StateHandle};
 use crate::transport;
 use motion::Motion;
 use parser::{Line, TempReport};
@@ -44,6 +44,10 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Reconnect backoff bounds.
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// How often to re-query the steel sheets while idle, so a sheet changed from the printer's
+/// own LCD menu is reflected in the UI (the printer doesn't announce the change). Skipped
+/// while a print is active so it never competes with the print stream.
+const SHEET_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Shared "last byte received from the printer" timestamp, used to distinguish a busy
 /// printer (still streaming temps) from a hung/disconnected one.
@@ -347,6 +351,8 @@ async fn run_connection(
     info!(sheets = ?state.snapshot().sheets.len(), "printer initialized; reporting ready");
 
     let mut motion = Motion::new();
+    let mut sheet_poll = tokio::time::interval(SHEET_POLL_INTERVAL);
+    sheet_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let end = loop {
         tokio::select! {
             biased;
@@ -391,6 +397,18 @@ async fn run_connection(
                     push_motion(state, &motion);
                 }
                 let _ = cmd.ack.send(result);
+            }
+            _ = sheet_poll.tick() => {
+                // Reflect a steel-sheet change made on the printer's own LCD: re-query the
+                // known sheets so the active one (A1) updates in the UI. M850 S<id> with no
+                // Z/A is a read-only report. Idle only — never interrupt a print's stream.
+                let snap = state.snapshot();
+                let idle = !matches!(snap.print_state, PrintState::Printing | PrintState::Paused);
+                if idle {
+                    for id in snap.sheets.iter().map(|s| s.id) {
+                        let _ = send!(&format!("M850 S{id}"));
+                    }
+                }
             }
         }
     };
