@@ -117,6 +117,14 @@ async fn run<S: Serial>(stream: S) {
     let drop_ok = std::env::var("S2M_MOCK_DROP_OK").is_ok();
     let mut dropped: Option<u64> = None;
 
+    // Test hook: simulate a printer whose line counter is stuck (e.g. survived a host
+    // reconnect while a partial line jammed the reset). It rejects every *framed* line whose
+    // number isn't last+1 — including M110, as if the reset never parsed — until the host
+    // realigns to the number it demands. Unframed lines (handshake M115) still pass.
+    let mut stuck_last: Option<u64> = std::env::var("S2M_MOCK_DESYNC")
+        .ok()
+        .and_then(|v| v.parse().ok());
+
     // Marlin prints a banner on power-up.
     let _ = write.write_all(b"start\n").await;
 
@@ -150,6 +158,25 @@ async fn run<S: Serial>(stream: S) {
                         .await;
                     let _ = write.write_all(format!("Resend: {n}\n").as_bytes()).await;
                     continue;
+                }
+
+                // Simulate a stuck line counter: reject framed lines that aren't last+1
+                // (M110 included) until the host adopts the demanded number.
+                if let Some(prev) = stuck_last
+                    && let Some(n) = line_number(raw)
+                {
+                    if n == prev + 1 {
+                        stuck_last = Some(n); // realigned — accept from here on
+                    } else {
+                        let _ = write
+                            .write_all(
+                                format!("Error:Line Number is not Last Line Number+1, Last Line: {prev}\n")
+                                    .as_bytes(),
+                            )
+                            .await;
+                        let _ = write.write_all(format!("Resend: {}\n", prev + 1).as_bytes()).await;
+                        continue;
+                    }
                 }
 
                 // Simulate a lost `ok`: process one command but send its reply WITHOUT the

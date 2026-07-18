@@ -333,11 +333,19 @@ async fn run_connection(
         };
     }
 
+    // Flush any partial line left in the printer's RX buffer — e.g. a half-sent command
+    // from a previous session that didn't reset (the Prusa keeps its serial state across our
+    // reconnects). A lone newline terminates that dangling line so it's discarded, and our
+    // first framed command lands on a clean boundary instead of being corrupted into it.
+    let _ = write.write_all(b"\n").await;
+    let _ = write.flush().await;
+
     // Initialize the printer for this connection: reset line numbering, identify, enable
     // temp autoreport, and discover steel-sheet profiles (the reader parses the M850
     // reports into state). Done before reporting ready so the sheet macros are present
     // when Mainsail reads the config. `line_no` starts at 0; M110 N0 resets the printer
-    // to match, so the first framed command after it is N1.
+    // to match, so the first framed command after it is N1. If the reset doesn't get
+    // through cleanly, send_and_wait realigns to the printer's counter on the first Resend.
     let _ = send!("M110 N0");
     let _ = send!("M115");
     let _ = send!("M155 S1");
@@ -646,8 +654,8 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
     // Discard any acks left over from a previous command before issuing this one.
     while ack_rx.try_recv().is_ok() {}
 
-    let n = *line_no;
-    let framed = frame(n, cmd);
+    let mut n = *line_no;
+    let mut framed = frame(n, cmd);
     let blocking = is_blocking_command(cmd);
     send_framed(write, &framed, stats).await?;
 
@@ -666,22 +674,30 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
                 sent_at = Instant::now();
             }
             Ok(Some(AckEvent::Resend(requested))) => {
-                // `Resend: R` means "the next line I expect is R". If R is past our line, the
-                // printer already has N (our `ok` was lost) — treat N as accepted and advance.
-                if requested > n {
-                    debug!(
-                        requested,
-                        line_no = n,
-                        "printer already has line; advancing"
-                    );
+                // `Resend: R` means "the next line I expect is R".
+                //
+                // R == n+1: the printer already has our current line N (its ack was lost) —
+                // treat N as accepted and advance to the next command.
+                if requested == n + 1 {
+                    debug!(requested, line_no = n, "printer already has line; advancing");
                     *line_no = n + 1;
                     return Ok(());
                 }
                 resends += 1;
-                debug!(requested, line_no = n, attempt = resends, "resending line");
                 if resends > 10 {
-                    bail!("too many resend requests for line N{n}: {cmd}");
+                    bail!("too many resends for line N{n} (printer wants N{requested}): {cmd}");
                 }
+                // Otherwise the printer wants line R for our current command: R == n is the
+                // normal checksum-error resend; R far from n is a line-number DESYNC (e.g. the
+                // printer's counter survived our reconnect). Either way, adopt R as our number
+                // and resend this command under it — that realigns us to the printer without
+                // needing an M110 to get through. On the following `ok` we continue from R+1.
+                if requested != n {
+                    warn!(requested, line_no = n, %cmd, "line-number desync; realigning to printer");
+                    n = requested;
+                    framed = frame(n, cmd);
+                }
+                debug!(requested, line_no = n, attempt = resends, "resending line");
                 send_framed(write, &framed, stats).await?;
                 sent_at = Instant::now();
             }
