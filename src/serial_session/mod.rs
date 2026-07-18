@@ -679,7 +679,11 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
                 // R == n+1: the printer already has our current line N (its ack was lost) —
                 // treat N as accepted and advance to the next command.
                 if requested == n + 1 {
-                    debug!(requested, line_no = n, "printer already has line; advancing");
+                    debug!(
+                        requested,
+                        line_no = n,
+                        "printer already has line; advancing"
+                    );
                     *line_no = n + 1;
                     return Ok(());
                 }
