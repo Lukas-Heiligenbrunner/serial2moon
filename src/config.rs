@@ -68,6 +68,17 @@ pub struct Config {
     #[arg(long, env = "S2M_LOG_DIR")]
     pub log_dir: Option<PathBuf>,
 
+    /// Rotate `serial2moon.log` once it reaches this many MB. The default debug level
+    /// writes ~23 MB per print hour.
+    #[arg(long, env = "S2M_LOG_MAX_SIZE_MB", default_value_t = 20,
+          value_parser = clap::value_parser!(u64).range(1..))]
+    pub log_max_size_mb: u64,
+
+    /// How many rotated logs to keep, gzip-compressed (`serial2moon.log.1.gz` is the
+    /// newest). The defaults keep ~9 print hours in ~55 MB. 0 keeps no history.
+    #[arg(long, env = "S2M_LOG_MAX_FILES", default_value_t = 10)]
+    pub log_max_files: usize,
+
     /// Prusa steel-sheet profiles to expose as Mainsail buttons, as `id:Label` pairs
     /// (id 0-7, the LCD order), e.g. "0:Smooth,1:Textured,2:Satin". Selecting one sends
     /// `M850 S<id> A1`.

@@ -5,6 +5,15 @@
 # autodetects the printer among the connected USB serial devices. If no printer is
 # connected it reports an error and keeps retrying (no mock/demo mode here).
 
+# Cap each container's stdout log (Docker's default json-file log never rotates, and
+# serial2moon's debug output would otherwise grow without bound on the SD card).
+# serial2moon's own retained log is the rotated serial2moon.log in the logs volume.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   serial2moon:
     image: serial2moon:bundled
@@ -38,6 +47,7 @@ services:
       - "c 188:* rmw" # USB serial (ttyUSB*)
       - "c 166:* rmw" # USB CDC ACM (ttyACM*)
     restart: unless-stopped
+    logging: *default-logging
 
   moonraker:
     image: mkuf/moonraker:latest
@@ -53,6 +63,7 @@ services:
     ports:
       - "7125:7125"
     restart: unless-stopped
+    logging: *default-logging
 
   mainsail:
     image: ghcr.io/mainsail-crew/mainsail:latest
@@ -63,6 +74,7 @@ services:
     volumes:
       - ./docker/mainsail-proxy.conf:/etc/nginx/extra-conf.d/moonraker.conf:ro
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   comms:

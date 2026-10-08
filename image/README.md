@@ -39,7 +39,10 @@ Steel sheets are auto-discovered from the printer (`M850`) and appear as macro b
   trigger these, just like the physical power button.
 
 Logs are written to Moonraker's logs dir, so `serial2moon.log` is downloadable from
-Mainsail's **Machine → Logfiles**.
+Mainsail's **Machine → Logfiles**. It rotates at 20 MB and keeps the last 10 rotations
+gzip-compressed (`serial2moon.log.1.gz` = newest): about 9 print hours in ~55 MB. Adjust via
+`S2M_LOG_MAX_SIZE_MB` / `S2M_LOG_MAX_FILES` in `serial2moon.conf`. The containers' stdout
+logs (`docker logs`) are capped at 3 × 10 MB each.
 
 Targets **arm64** (Pi 3 / 4 / 5 / Zero 2 W).
 

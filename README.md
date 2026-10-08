@@ -119,6 +119,8 @@ editable `serial2moon.conf` shown next to `moonraker.conf` in Mainsail.
 | `--pause-lift` / `S2M_PAUSE_LIFT` | `5` | Z lift (mm) on pause/cancel |
 | `--pause-retract` / `S2M_PAUSE_RETRACT` | `1` | retract (mm) on pause/cancel |
 | `--log-dir` / `S2M_LOG_DIR` | — | also write logs to this dir |
+| `--log-max-size-mb` / `S2M_LOG_MAX_SIZE_MB` | `20` | rotate `serial2moon.log` at this size |
+| `--log-max-files` / `S2M_LOG_MAX_FILES` | `10` | rotated logs kept, gzip-compressed (`0` = none) |
 | `RUST_LOG` | `info,serial2moon=debug` | log verbosity |
 
 ## Limitations

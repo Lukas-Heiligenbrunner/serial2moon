@@ -7,6 +7,13 @@
 # gcode directory line up. serial2moon runs as uid 1000 to match Moonraker's user,
 # so uploaded files and the socket are mutually accessible.
 
+# Cap each container's stdout log (Docker's default json-file log never rotates).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   serial2moon:
     build: .
@@ -29,6 +36,7 @@ services:
       - gcodes:/opt/printer_data/gcodes
       - config:/opt/printer_data/config
     restart: unless-stopped
+    logging: *default-logging
     # ---- For a real printer instead of the mock, comment the mock command above and use: ----
     # command:
     #   - "--transport=serial"
@@ -49,6 +57,7 @@ services:
     ports:
       - "7125:7125"
     restart: unless-stopped
+    logging: *default-logging
 
   mainsail:
     image: ghcr.io/mainsail-crew/mainsail:latest
@@ -59,6 +68,7 @@ services:
     ports:
       - "8088:80"
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   comms:
