@@ -23,10 +23,14 @@ pub enum Line {
     Ok(TempReport),
     /// Unsolicited temperature autoreport (M155).
     Temp(TempReport),
-    /// `busy: processing` — printer alive but working; resets the ack timeout.
+    /// `busy: processing` (Prusa: `echo:busy: processing` / `echo:busy: paused for user`)
+    /// — printer alive but working; resets the ack timeout.
     Busy,
     /// `Resend: N` — printer wants a line resent.
     Resend(u64),
+    /// `RX timeout` (Prusa) — the printer received part of a line but no newline within
+    /// 2 s and discarded it. It sends no `ok` and no `Resend`, so the line must be re-sent.
+    RxTimeout,
     /// `echo:` informational message.
     Echo(String),
     /// `Error:` / `!!` error message.
@@ -86,8 +90,11 @@ pub fn classify(raw: &str) -> Line {
     if lower == "start" {
         return Line::Start;
     }
-    if lower.starts_with("busy:") {
+    if lower.starts_with("busy:") || lower.starts_with("echo:busy:") {
         return Line::Busy;
+    }
+    if lower == "rx timeout" {
+        return Line::RxTimeout;
     }
     if let Some(rest) = line
         .strip_prefix("Resend:")
@@ -227,6 +234,19 @@ mod tests {
             Line::Error(_)
         ));
         assert!(matches!(classify("ok"), Line::Ok(_)));
+    }
+
+    #[test]
+    fn classifies_prusa_echo_busy_as_busy() {
+        // Prusa's host keepalive carries an `echo:` prefix.
+        assert!(matches!(classify("echo:busy: processing"), Line::Busy));
+        assert!(matches!(classify("echo:busy: paused for user"), Line::Busy));
+    }
+
+    #[test]
+    fn classifies_prusa_rx_timeout() {
+        // Prusa drops a partial line after 2 s without its newline — no ok, no Resend.
+        assert!(matches!(classify("RX timeout"), Line::RxTimeout));
     }
 
     #[test]

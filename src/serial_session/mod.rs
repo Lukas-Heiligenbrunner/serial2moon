@@ -73,6 +73,8 @@ enum AckEvent {
     Ok,
     Busy,
     Resend(u64),
+    /// The printer discarded a partial line (no newline within its 2 s RX timeout).
+    RxTimeout,
     /// The printer rejected/erred on a command. The message is logged by the reader; the
     /// supervisor only needs to know an error occurred (it keeps waiting for `ok`/`Resend`).
     Error,
@@ -568,6 +570,9 @@ async fn reader<R: AsyncReadExt + Unpin>(
                     Line::Resend(n) => {
                         let _ = ack_tx.send(AckEvent::Resend(n)).await;
                     }
+                    Line::RxTimeout => {
+                        let _ = ack_tx.send(AckEvent::RxTimeout).await;
+                    }
                     Line::Error(msg) => {
                         warn!(error = %msg, "printer reported error");
                         let _ = console.send(format!("!! {msg}"));
@@ -705,6 +710,19 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
                 send_framed(write, &framed, stats).await?;
                 sent_at = Instant::now();
             }
+            Ok(Some(AckEvent::RxTimeout)) => {
+                // The printer got only part of this line and dropped it — no `ok` or
+                // `Resend` will follow. Re-send now rather than waiting out ACK_TIMEOUT.
+                // This also covers blocking commands, which have no ACK_TIMEOUT: a dropped
+                // M109/G28 would otherwise never be acked.
+                resends += 1;
+                warn!(line_no = n, attempt = resends, %cmd, "printer dropped a partial line (RX timeout); re-sending");
+                if resends > 10 {
+                    bail!("printer dropped line N{n} {resends} times (RX timeout): {cmd}");
+                }
+                send_framed(write, &framed, stats).await?;
+                sent_at = Instant::now();
+            }
             Ok(Some(AckEvent::Error)) => {
                 // Do NOT treat an error as an ack (it was already logged by the reader).
                 // A checksum / line-number error is emitted as `Error: ...` *followed by*
@@ -755,17 +773,30 @@ async fn send_framed<W: AsyncWriteExt + Unpin>(
     write_line(write, framed).await
 }
 
+/// The line and its terminator go out in ONE write. As two writes they become two USB
+/// transfers, and on the Prusa MK3S the trailing lone "\n" was occasionally lost: the
+/// printer then holds an unterminated line, drops it after 2 s ("RX timeout") and never
+/// acks, stalling the print.
 async fn write_line<W: AsyncWriteExt + Unpin>(write: &mut W, line: &str) -> Result<()> {
     debug!(target: "serial2moon::tx", "{line}");
-    write.write_all(line.as_bytes()).await?;
-    write.write_all(b"\n").await?;
+    let mut buf = Vec::with_capacity(line.len() + 1);
+    buf.extend_from_slice(line.as_bytes());
+    buf.push(b'\n');
+    write.write_all(&buf).await?;
     write.flush().await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{checksum, frame};
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use tokio::io::AsyncWrite;
+
+    use super::*;
+    use crate::state::PrinterState;
 
     #[test]
     fn marlin_checksum_and_frame() {
@@ -773,5 +804,108 @@ mod tests {
         assert_eq!(checksum("N0 M110 N0"), 125);
         assert_eq!(frame(0, "M110 N0"), "N0 M110 N0*125");
         assert_eq!(frame(1, "M115"), format!("N1 M115*{}", checksum("N1 M115")));
+    }
+
+    /// Writer that reports every individual `poll_write` call, so tests can see how a line
+    /// is split across writes (each write becomes its own USB transfer on the real port).
+    struct Recorder(mpsc::UnboundedSender<Vec<u8>>);
+
+    impl AsyncWrite for Recorder {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let _ = self.0.send(buf.to_vec());
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn writes_line_and_newline_in_a_single_write() {
+        // A separate trailing "\n" write was observed to get lost on the way to a Prusa
+        // MK3S, leaving an unterminated line the printer discards after 2 s (RX timeout).
+        let (tx, mut writes) = mpsc::unbounded_channel();
+        write_line(&mut Recorder(tx), "N7 G1 F2400*74")
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while let Ok(w) = writes.try_recv() {
+            got.push(w);
+        }
+        assert_eq!(got, vec![b"N7 G1 F2400*74\n".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn resends_immediately_when_printer_reports_rx_timeout() {
+        let (wtx, mut writes) = mpsc::unbounded_channel();
+        let (ack_tx, mut ack_rx) = mpsc::channel(8);
+        let last_seen: LastSeen = Arc::new(Mutex::new(Instant::now()));
+        let stats = Stats::default();
+        let mut line_no = 7;
+
+        let mut writer = Recorder(wtx);
+        let sender = send_and_wait(
+            &mut writer,
+            "G1 F2400",
+            &mut ack_rx,
+            &last_seen,
+            &stats,
+            &mut line_no,
+        );
+        let printer = async {
+            let first = writes.recv().await.unwrap();
+            ack_tx.send(AckEvent::RxTimeout).await.unwrap();
+            let second = writes.recv().await.unwrap();
+            ack_tx.send(AckEvent::Ok).await.unwrap();
+            (first, second)
+        };
+        // Well under ACK_TIMEOUT: the RX timeout itself must trigger the re-send.
+        let (result, (first, second)) =
+            timeout(ACK_TIMEOUT / 4, async { tokio::join!(sender, printer) })
+                .await
+                .expect("line was not re-sent promptly after RX timeout");
+        result.unwrap();
+        assert_eq!(first, second, "the same framed line is re-sent");
+        assert_eq!(line_no, 8, "line accepted after the re-send");
+    }
+
+    #[tokio::test]
+    async fn reader_forwards_prusa_busy_and_rx_timeout() {
+        let input: &[u8] = b"echo:busy: processing\nRX timeout\nok\n";
+        let state = StateHandle::spawn(PrinterState::new(
+            [250.0, 210.0, 210.0, 0.0],
+            200.0,
+            1000.0,
+            300.0,
+            120.0,
+            "./gcodes".into(),
+            vec![],
+            false,
+        ));
+        let (console, _) = broadcast::channel(16);
+        let (ack_tx, mut ack_rx) = mpsc::channel(8);
+        let (restart_tx, _restart_rx) = mpsc::unbounded_channel();
+        reader(
+            input,
+            state,
+            console,
+            ack_tx,
+            PrintHandle::new(),
+            restart_tx,
+            Arc::new(Mutex::new(Instant::now())),
+            Arc::new(Stats::default()),
+        )
+        .await;
+
+        assert!(matches!(ack_rx.recv().await, Some(AckEvent::Busy)));
+        assert!(matches!(ack_rx.recv().await, Some(AckEvent::RxTimeout)));
+        assert!(matches!(ack_rx.recv().await, Some(AckEvent::Ok)));
     }
 }
