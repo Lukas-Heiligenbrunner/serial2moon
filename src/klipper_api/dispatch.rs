@@ -75,7 +75,7 @@ async fn route(
             gcode::execute(app, script).await?;
             Ok(json!({}))
         }
-        "gcode/help" => Ok(json!({})),
+        "gcode/help" => Ok(Value::Object(gcode::help_map(&app.state.snapshot()))),
         // Moonraker drives pause/resume/cancel through these Klipper endpoints (registered
         // by Klipper's pause_resume module), not the PAUSE/RESUME/CANCEL_PRINT g-code.
         "pause_resume/pause" => {

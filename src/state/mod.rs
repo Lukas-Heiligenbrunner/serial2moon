@@ -3,6 +3,7 @@
 
 pub mod eventtime;
 pub mod objects;
+pub mod sysstats;
 
 use std::sync::Arc;
 

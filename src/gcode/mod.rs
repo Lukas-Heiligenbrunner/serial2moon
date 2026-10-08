@@ -2,4 +2,4 @@
 
 pub mod translate;
 
-pub use translate::execute;
+pub use translate::{execute, help_map};

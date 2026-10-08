@@ -127,6 +127,14 @@ pub struct PrinterState {
     pub mcu_receive_seq: u64,
     /// Serial-link utilization 0.0–1.0, surfaced as the MCU "load".
     pub mcu_load: f64,
+
+    // Host stats, surfaced as the Klipper `system_stats` object (see `sysstats`).
+    /// 1-minute load average.
+    pub sysload: f64,
+    /// serial2moon's own CPU time in seconds.
+    pub cputime: f64,
+    /// Available host memory in kB.
+    pub memavail: u64,
 }
 
 impl PrinterState {
@@ -188,6 +196,9 @@ impl PrinterState {
             mcu_send_seq: 0,
             mcu_receive_seq: 0,
             mcu_load: 0.0,
+            sysload: 0.0,
+            cputime: 0.0,
+            memavail: 0,
             sheets: sheets
                 .into_iter()
                 .map(|(id, label)| Sheet { id, label, z: None })
@@ -312,6 +323,17 @@ impl PrinterState {
                     "receive_seq": self.mcu_receive_seq,
                     "freq": 16_000_000,
                 },
+            }),
+        );
+
+        // Host load / memory, as Klipper's statistics module reports them. Frontends and
+        // integrations (Mainsail host stats, Home Assistant's moonraker) expect it present.
+        m.insert(
+            "system_stats".into(),
+            json!({
+                "sysload": self.sysload,
+                "cputime": self.cputime,
+                "memavail": self.memavail,
             }),
         );
 

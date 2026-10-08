@@ -6,10 +6,11 @@
 //! acked-and-logged rather than dropped silently.
 
 use anyhow::{Context, Result, bail};
+use serde_json::{Map, Value};
 use tracing::{debug, info, warn};
 
 use crate::app::App;
-use crate::state::{KlippyState, sheet_macro_name};
+use crate::state::{KlippyState, PrinterState, sheet_macro_name};
 
 /// Run a (possibly multi-line) script to completion.
 pub async fn execute(app: &App, script: &str) -> Result<()> {
@@ -145,6 +146,58 @@ fn help(app: &App) {
     for line in LINES {
         let _ = app.console.send((*line).to_string());
     }
+}
+
+/// Extended commands with real behavior, answered by the `gcode/help` endpoint as
+/// `{command: description}` like Klipper. Moonraker relays it as `/printer/gcode/help`:
+/// Mainsail completes console commands from it and Home Assistant creates a macro button
+/// per entry. It must never be empty — Moonraker turns an empty result into `"ok"`.
+/// Accepted-but-ignored [`NOOP_COMMANDS`] are left out on purpose.
+pub fn help_map(state: &PrinterState) -> Map<String, Value> {
+    // Wording follows Klipper's own help strings where the command behaves the same.
+    const BUILTIN: &[(&str, &str)] = &[
+        (
+            "HELP",
+            "Report the list of available extended G-Code commands",
+        ),
+        ("PAUSE", "Pauses the current print"),
+        ("RESUME", "Resumes the print from a pause"),
+        ("CANCEL_PRINT", "Cancel the current print"),
+        (
+            "SDCARD_PRINT_FILE",
+            "Loads a SD file and starts the print. May include files in subdirectories.",
+        ),
+        ("SET_HEATER_TEMPERATURE", "Sets a heater temperature"),
+        ("TURN_OFF_HEATERS", "Turn off all heaters"),
+        ("SET_FAN_SPEED", "Sets the speed of the part-cooling fan"),
+        (
+            "RESTART",
+            "Re-initialize the printer over the existing serial link",
+        ),
+        (
+            "FIRMWARE_RESTART",
+            "Drop and reopen the serial connection to the printer",
+        ),
+    ];
+    let mut m: Map<String, Value> = BUILTIN
+        .iter()
+        .map(|(cmd, desc)| ((*cmd).to_string(), Value::from(*desc)))
+        .collect();
+    for sheet in &state.sheets {
+        m.insert(
+            sheet_macro_name(&sheet.label),
+            format!(
+                "Activate steel sheet '{}' with its stored live-Z",
+                sheet.label
+            )
+            .into(),
+        );
+    }
+    if state.host_control {
+        m.insert("HOST_REBOOT".into(), "Reboot the host computer".into());
+        m.insert("HOST_SHUTDOWN".into(), "Shut down the host computer".into());
+    }
+    m
 }
 
 /// Activate a steel sheet (Prusa `M850`), applying its stored live-Z. Includes the known
@@ -350,5 +403,50 @@ mod tests {
         assert!(is_marlin_code("T0"));
         assert!(!is_marlin_code("PAUSE"));
         assert!(!is_marlin_code("SET_HEATER_TEMPERATURE"));
+    }
+
+    fn state(sheets: Vec<(u8, String)>, host_control: bool) -> PrinterState {
+        PrinterState::new(
+            [220.0, 220.0, 250.0, 0.0],
+            300.0,
+            3000.0,
+            300.0,
+            120.0,
+            "./gcodes".into(),
+            sheets,
+            host_control,
+        )
+    }
+
+    #[test]
+    fn help_map_lists_builtin_commands_with_descriptions() {
+        let m = help_map(&state(vec![], false));
+        for cmd in [
+            "PAUSE",
+            "RESUME",
+            "CANCEL_PRINT",
+            "SDCARD_PRINT_FILE",
+            "HELP",
+        ] {
+            assert!(
+                m.get(cmd)
+                    .and_then(Value::as_str)
+                    .is_some_and(|d| !d.is_empty()),
+                "{cmd} missing a description"
+            );
+        }
+        assert!(!m.contains_key("HOST_REBOOT"));
+        assert!(
+            !m.contains_key("SET_PRESSURE_ADVANCE"),
+            "no-op commands stay unlisted"
+        );
+    }
+
+    #[test]
+    fn help_map_includes_sheet_and_host_macros() {
+        let m = help_map(&state(vec![(1, "Smooth PEI".into())], true));
+        assert!(m.contains_key("SHEET_SMOOTH_PEI"));
+        assert!(m.contains_key("HOST_REBOOT"));
+        assert!(m.contains_key("HOST_SHUTDOWN"));
     }
 }

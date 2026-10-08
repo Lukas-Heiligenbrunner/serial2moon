@@ -127,6 +127,7 @@ async fn main() -> Result<()> {
         config.parsed_sheets(),
         config.host_control_dir.is_some(),
     ));
+    state::sysstats::spawn(state.clone());
 
     // Console (Marlin echo/error) fan-out.
     let (console, _) = broadcast::channel::<String>(256);
