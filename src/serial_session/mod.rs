@@ -35,13 +35,15 @@ use parser::{HostAction, Line, TempReport};
 /// Blocking G-code (M109/M190 heat waits, G28/G29) can take minutes, but the printer keeps
 /// streaming temperature lines meanwhile — so we time out on silence, not on elapsed time.
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
-/// For a *non-blocking* command, if no `ok` arrives within this long while the printer is
-/// otherwise alive (still streaming temps), the `ok` was almost certainly lost on the wire —
-/// a depth-1 deadlock (we await an `ok` that never comes; the printer awaits the next line).
-/// We re-send the line to break it; line numbers make that safe (Marlin re-acks or asks for
-/// the next line). Must comfortably exceed the worst-case delayed-`ok` from a full planner
-/// buffer of slow moves, so it never fires spuriously mid-print.
-const ACK_TIMEOUT: Duration = Duration::from_secs(8);
+/// For a *non-blocking* command, if the printer says nothing about it for this long while
+/// it is otherwise alive (still streaming temps), the line (or its `ok`) was lost on the
+/// wire — a depth-1 deadlock (we await an `ok` that never comes; the printer awaits the next
+/// line). We re-send the line to break it; line numbers make that safe (Marlin re-acks or
+/// asks for the next line). A printer that got the line answers within ~2 s even when the
+/// planner is full: `ok`, or a `busy:` keepalive every 2 s, which restarts this timer. On a
+/// Prusa MK3S the slowest first answer over 10.4M lines was 2.04 s, so 3 s never fires on a
+/// line that arrived — and a lost one costs 3 s instead of the 8 s this used to be.
+const ACK_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often the command wait wakes to check the timeouts above.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Reconnect backoff bounds.
@@ -1068,6 +1070,81 @@ mod tests {
         assert_eq!(first, line("M602"));
         assert!(writes.try_recv().is_err(), "nothing re-sent");
         assert_eq!(numbering.next(), 5, "line counter untouched");
+    }
+
+    #[tokio::test]
+    async fn re_sends_a_lost_line_after_three_seconds_of_silence() {
+        // The line never reached the printer: no ok, no busy, no RX timeout — only temps.
+        let (wtx, mut writes) = mpsc::unbounded_channel();
+        let (ack_tx, mut ack_rx) = mpsc::channel(8);
+        let last_seen: LastSeen = Arc::new(Mutex::new(Instant::now()));
+        let stats = Stats::default();
+        let mut numbering = numbering_through(4);
+
+        let mut writer = Recorder(wtx);
+        let sender = send_and_wait(
+            &mut writer,
+            "G1 X5",
+            true,
+            &mut ack_rx,
+            &last_seen,
+            &stats,
+            &mut numbering,
+        );
+        let printer = async {
+            let first = writes.recv().await.unwrap();
+            let sent = Instant::now();
+            let second = timeout(Duration::from_millis(3500), writes.recv())
+                .await
+                .expect("lost line not re-sent within 3.5 s")
+                .unwrap();
+            let waited = sent.elapsed();
+            ack_tx.send(AckEvent::Ok).await.unwrap();
+            (first, second, waited)
+        };
+        let (result, (first, second, waited)) = tokio::join!(sender, printer);
+        result.unwrap();
+        assert_eq!(first, second, "the same line is re-sent");
+        assert!(
+            waited >= Duration::from_millis(2900),
+            "re-sent too early: {waited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_keepalives_keep_a_slow_line_from_being_re_sent() {
+        // A full planner of slow moves: the printer says `busy` every 2 s until it acks.
+        let (wtx, mut writes) = mpsc::unbounded_channel();
+        let (ack_tx, mut ack_rx) = mpsc::channel(8);
+        let last_seen: LastSeen = Arc::new(Mutex::new(Instant::now()));
+        let stats = Stats::default();
+        let mut numbering = numbering_through(4);
+
+        let mut writer = Recorder(wtx);
+        let sender = send_and_wait(
+            &mut writer,
+            "G1 X5 E2.5 F600",
+            true,
+            &mut ack_rx,
+            &last_seen,
+            &stats,
+            &mut numbering,
+        );
+        let printer = async {
+            writes.recv().await.unwrap();
+            for _ in 0..2 {
+                sleep(Duration::from_secs(2)).await;
+                ack_tx.send(AckEvent::Busy).await.unwrap();
+            }
+            sleep(Duration::from_millis(1500)).await;
+            ack_tx.send(AckEvent::Ok).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(sender, printer);
+        result.unwrap();
+        assert!(
+            writes.try_recv().is_err(),
+            "a busy line must not be re-sent"
+        );
     }
 
     /// Feed raw printer output through the reader and collect every event it forwards.
