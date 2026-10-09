@@ -29,9 +29,10 @@ jobs:
             -o type=docker,dest=image/files/opt/serial2moon/images/serial2moon.tar .
           # Upstream images: pull the arm64 variant and save.
           docker pull --platform linux/arm64 mkuf/moonraker:latest
-          docker pull --platform linux/arm64 ghcr.io/mainsail-crew/mainsail:latest
+          # Mainsail: the `v2` tag the stack's compose.yml uses (`latest` is the 8080 variant).
+          docker pull --platform linux/arm64 ghcr.io/mainsail-crew/mainsail:v2
           docker save mkuf/moonraker:latest        -o image/files/opt/serial2moon/images/moonraker.tar
-          docker save ghcr.io/mainsail-crew/mainsail:latest -o image/files/opt/serial2moon/images/mainsail.tar
+          docker save ghcr.io/mainsail-crew/mainsail:v2 -o image/files/opt/serial2moon/images/mainsail.tar
 
       - name: Bake Raspberry Pi OS image
         id: build

@@ -60,7 +60,9 @@ services:
     logging: *default-logging
 
   mainsail:
-    image: ghcr.io/mainsail-crew/mainsail:latest
+    # Pinned to the `v2` line, not `latest`: since v2.19.0 upstream's `latest` points at the
+    # unprivileged variant (nginx on 8080), which breaks the 8088:80 mapping below.
+    image: ghcr.io/mainsail-crew/mainsail:v2
     depends_on:
       - moonraker
     volumes:

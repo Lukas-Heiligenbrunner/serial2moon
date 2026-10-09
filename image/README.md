@@ -86,7 +86,7 @@ mkdir -p image/files/opt/serial2moon/images
 docker buildx build --platform linux/arm64 -f Dockerfile -t serial2moon:bundled \
   -o type=docker,dest=image/files/opt/serial2moon/images/serial2moon.tar .
 docker pull --platform linux/arm64 mkuf/moonraker:latest && docker save mkuf/moonraker:latest -o image/files/opt/serial2moon/images/moonraker.tar
-docker pull --platform linux/arm64 ghcr.io/mainsail-crew/mainsail:latest && docker save ghcr.io/mainsail-crew/mainsail:latest -o image/files/opt/serial2moon/images/mainsail.tar
+docker pull --platform linux/arm64 ghcr.io/mainsail-crew/mainsail:v2 && docker save ghcr.io/mainsail-crew/mainsail:v2 -o image/files/opt/serial2moon/images/mainsail.tar
 # then run pguyot/arm-runner-action's CLI, or replicate provision.sh against a mounted Pi OS image.
 ```
 (The CI workflow is the supported path; local baking needs loop-mount/qemu privileges.)
