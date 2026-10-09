@@ -4,6 +4,8 @@
 mod app;
 mod config;
 mod gcode;
+#[cfg(test)]
+mod integration_tests;
 mod klipper_api;
 mod logfile;
 mod print_job;
@@ -83,6 +85,7 @@ S2M_EXTRUDER_MAX_TEMP=300
 S2M_BED_MAX_TEMP=120
 
 # Pause/cancel parking: lift the toolhead (mm) and retract filament (mm); 0 disables.
+# Prusa printers pause with their own M601 (lift applies, the retract is the firmware's).
 S2M_PAUSE_LIFT=5
 S2M_PAUSE_RETRACT=1
 

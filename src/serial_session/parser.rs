@@ -168,13 +168,39 @@ pub fn parse_firmware(line: &str) -> Option<(String, String)> {
     find("FIRMWARE_NAME").map(|fw| (fw, find("MACHINE_TYPE").unwrap_or_default()))
 }
 
-/// Parse a Marlin/Prusa host *action command* (sent when the printer's LCD is used during
-/// a USB print), e.g. `//action:pause`, `// action:cancel`. Returns the lower-cased action
-/// (`pause`/`resume`/`cancel`/…) or None.
-pub fn parse_action(line: &str) -> Option<String> {
+/// A Marlin/Prusa host action command (`//action:<what>`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostAction {
+    /// `pause`: the printer asks the host to pause (LCD "Pause" during a USB print — the
+    /// firmware itself does nothing else).
+    AskPause,
+    /// `paused`: the printer has paused by itself (M600 filament change incl. runout, M601).
+    Paused,
+    /// `resume`: the printer asks the host to resume (LCD "Resume").
+    AskResume,
+    /// `resumed`: the printer has resumed by itself.
+    Resumed,
+    /// `cancel`: the print was stopped on the printer (LCD "Stop", M603).
+    Cancel,
+    /// `notification <text>`, e.g. "Filament Runout Detected".
+    Notification(String),
+    Other(String),
+}
+
+/// Parse a host action command, e.g. `//action:pause`, `// action:cancel`.
+pub fn parse_action(line: &str) -> Option<HostAction> {
     let rest = line.trim().strip_prefix("//")?.trim_start();
-    rest.strip_prefix("action:")
-        .map(|cmd| cmd.trim().to_ascii_lowercase())
+    let action = rest.strip_prefix("action:")?.trim();
+    let (word, text) = action.split_once(' ').unwrap_or((action, ""));
+    Some(match word.to_ascii_lowercase().as_str() {
+        "pause" => HostAction::AskPause,
+        "paused" => HostAction::Paused,
+        "resume" => HostAction::AskResume,
+        "resumed" => HostAction::Resumed,
+        "cancel" => HostAction::Cancel,
+        "notification" => HostAction::Notification(text.trim().to_string()),
+        _ => HostAction::Other(action.to_string()),
+    })
 }
 
 /// Parse a Prusa `M850` sheet report into `(id, label, z_offset, active)`, e.g.
@@ -277,10 +303,30 @@ mod tests {
 
     #[test]
     fn parses_host_action_commands() {
-        assert_eq!(parse_action("//action:pause").as_deref(), Some("pause"));
-        assert_eq!(parse_action("// action:cancel").as_deref(), Some("cancel"));
-        assert_eq!(parse_action("//action:resume").as_deref(), Some("resume"));
+        assert_eq!(parse_action("//action:pause"), Some(HostAction::AskPause));
+        assert_eq!(parse_action("// action:cancel"), Some(HostAction::Cancel));
+        assert_eq!(parse_action("//action:resume"), Some(HostAction::AskResume));
         assert_eq!(parse_action("echo:busy"), None);
         assert_eq!(parse_action("// regular comment"), None);
+    }
+
+    #[test]
+    fn tells_pause_requests_from_pause_reports() {
+        // `pause`/`resume` ask the host to act; `paused`/`resumed` report what the printer
+        // already did by itself (M600 filament change, M601) — acting on those pauses twice.
+        assert_eq!(parse_action("//action:paused"), Some(HostAction::Paused));
+        assert_eq!(parse_action("//action:resumed"), Some(HostAction::Resumed));
+    }
+
+    #[test]
+    fn keeps_the_text_of_notifications() {
+        assert_eq!(
+            parse_action("//action:notification Filament Runout Detected"),
+            Some(HostAction::Notification("Filament Runout Detected".into()))
+        );
+        assert_eq!(
+            parse_action("//action:uvlo_recovery_ready"),
+            Some(HostAction::Other("uvlo_recovery_ready".into()))
+        );
     }
 }

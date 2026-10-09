@@ -9,13 +9,15 @@
 //! depth-1 "send line → await ok" handshake with two priority levels and tracks motion.
 
 pub mod motion;
+pub mod numbering;
 pub mod parser;
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{sleep, timeout};
@@ -26,7 +28,8 @@ use crate::print_job::PrintHandle;
 use crate::state::{KlippyState, PrintState, StateHandle};
 use crate::transport;
 use motion::Motion;
-use parser::{Line, TempReport};
+use numbering::{Numbering, Pending, Step};
+use parser::{HostAction, Line, TempReport};
 
 /// A command is considered hung only after this long with NO data at all from the printer.
 /// Blocking G-code (M109/M190 heat waits, G28/G29) can take minutes, but the printer keeps
@@ -44,6 +47,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Reconnect backoff bounds.
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// How often to tell a Prusa that a host is connected (`M79`; it forgets after 30 s).
+/// Its LCD only offers Resume for a paused USB print while it knows of a host.
+const HOST_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// How often to re-query the steel sheets while idle, so a sheet changed from the printer's
 /// own LCD menu is reflected in the UI (the printer doesn't announce the change). Skipped
 /// while a print is active so it never competes with the print stream.
@@ -65,6 +71,8 @@ struct Stats {
 
 struct Cmd {
     line: String,
+    /// Framed with a line number + checksum (everything except Prusa control commands).
+    numbered: bool,
     ack: oneshot::Sender<Result<()>>,
 }
 
@@ -111,12 +119,19 @@ pub struct SerialHandle {
 impl SerialHandle {
     /// Submit an interactive/control command (jumps ahead of the print feed).
     pub async fn send_high(&self, line: impl Into<String>) -> Result<()> {
-        Self::submit(&self.high, line.into()).await
+        Self::submit(&self.high, line.into(), true).await
     }
 
     /// Submit a print-stream line (yields to interactive commands).
     pub async fn send_low(&self, line: impl Into<String>) -> Result<()> {
-        Self::submit(&self.low, line.into()).await
+        Self::submit(&self.low, line.into(), true).await
+    }
+
+    /// Submit a Prusa print-control command (M601/M602/M603) WITHOUT a line number. The
+    /// firmware rewinds its line counter around pause/resume and asks to resend from its
+    /// saved line; unnumbered, these commands never become part of that replay.
+    pub async fn send_control(&self, line: impl Into<String>) -> Result<()> {
+        Self::submit(&self.high, line.into(), false).await
     }
 
     /// Klipper `RESTART`: re-initialize the printer over the existing link.
@@ -135,11 +150,15 @@ impl SerialHandle {
             .map_err(|_| anyhow!("serial session closed"))
     }
 
-    async fn submit(ch: &mpsc::Sender<Cmd>, line: String) -> Result<()> {
+    async fn submit(ch: &mpsc::Sender<Cmd>, line: String, numbered: bool) -> Result<()> {
         let (ack, rx) = oneshot::channel();
-        ch.send(Cmd { line, ack })
-            .await
-            .map_err(|_| anyhow!("serial session closed"))?;
+        ch.send(Cmd {
+            line,
+            numbered,
+            ack,
+        })
+        .await
+        .map_err(|_| anyhow!("serial session closed"))?;
         rx.await
             .map_err(|_| anyhow!("serial session dropped before ack"))?
     }
@@ -319,20 +338,27 @@ async fn run_connection(
         }
     });
 
-    // Line-number counter for the checksummed Marlin protocol. M110 N0 resets the
-    // printer's counter; framing then starts at N1. `init` does the reset + handshake.
-    let mut line_no: u64 = 0;
-    macro_rules! send {
-        ($cmd:expr) => {
+    // Line numbering for the checksummed Marlin protocol (plus the history needed to
+    // replay lines on request). M110 N0 resets the printer's counter; framing then starts
+    // at N1. `init` does the reset + handshake.
+    let mut numbering = Numbering::new();
+    macro_rules! send_as {
+        ($cmd:expr, $numbered:expr) => {
             send_and_wait(
                 &mut write,
                 $cmd,
+                $numbered,
                 &mut ack_rx,
                 &last_seen,
                 &stats,
-                &mut line_no,
+                &mut numbering,
             )
             .await
+        };
+    }
+    macro_rules! send {
+        ($cmd:expr) => {
+            send_as!($cmd, true)
         };
     }
 
@@ -346,7 +372,7 @@ async fn run_connection(
     // Initialize the printer for this connection: reset line numbering, identify, enable
     // temp autoreport, and discover steel-sheet profiles (the reader parses the M850
     // reports into state). Done before reporting ready so the sheet macros are present
-    // when Mainsail reads the config. `line_no` starts at 0; M110 N0 resets the printer
+    // when Mainsail reads the config. Numbering starts at 0; M110 N0 resets the printer
     // to match, so the first framed command after it is N1. If the reset doesn't get
     // through cleanly, send_and_wait realigns to the printer's counter on the first Resend.
     let _ = send!("M110 N0");
@@ -364,6 +390,8 @@ async fn run_connection(
     let mut motion = Motion::new();
     let mut sheet_poll = tokio::time::interval(SHEET_POLL_INTERVAL);
     sheet_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut host_keepalive = tokio::time::interval(HOST_KEEPALIVE_INTERVAL);
+    host_keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let end = loop {
         tokio::select! {
             biased;
@@ -373,7 +401,7 @@ async fn run_connection(
                 // re-initialize in place rather than reconnecting. The printer's line counter
                 // reset too, so re-sync with M110. Homing/position are lost.
                 warn!("re-initializing printer after reset");
-                line_no = 0;
+                numbering.reset();
                 let _ = send!("M110 N0");
                 let _ = send!("M155 S1");
                 motion = Motion::new();
@@ -390,7 +418,7 @@ async fn run_connection(
                 RestartKind::Reinit => {
                     warn!("restart requested; re-initializing printer");
                     print.abort().await;
-                    line_no = 0;
+                    numbering.reset();
                     let _ = send!("M110 N0");
                     let _ = send!("M155 S1");
                     motion = Motion::new();
@@ -401,9 +429,15 @@ async fn run_connection(
                     });
                 }
             },
+            // Ahead of the command stream, which would otherwise starve it while printing.
+            _ = host_keepalive.tick() => {
+                if state.snapshot().is_prusa() {
+                    let _ = send_as!(r#"M79 S"SM""#, false); // unnumbered, like M601/M602
+                }
+            }
             cmd = recv_cmd(high_rx, low_rx) => {
                 let Some(cmd) = cmd else { break ConnectionEnd::Shutdown };
-                let result = send!(&cmd.line);
+                let result = send_as!(&cmd.line, cmd.numbered);
                 let extruded_before = motion.extruded();
                 if result.is_ok() && motion.apply(&cmd.line) {
                     push_motion(state, &motion, motion.extruded() - extruded_before);
@@ -547,21 +581,39 @@ async fn reader<R: AsyncReadExt + Unpin>(
                 }
                 // React to host action commands from the printer's LCD (pause/resume/cancel
                 // a USB print). Errors (e.g. no active print) are ignored.
+                // Requests (LCD Pause/Resume/Stop during a USB print) make the host act;
+                // reports (`paused`/`resumed`: M600 filament change incl. runout, M601) only
+                // mirror what the printer did by itself — acting on those would pause twice.
+                // Errors (e.g. no active print) are ignored.
                 if let Some(action) = parser::parse_action(&raw) {
-                    match action.as_str() {
-                        "pause" | "paused" => {
-                            info!("printer requested pause");
+                    match action {
+                        HostAction::AskPause => {
+                            info!("printer asked to pause");
                             let _ = print.pause(&state).await;
                         }
-                        "resume" | "resumed" => {
-                            info!("printer requested resume");
+                        HostAction::AskResume => {
+                            info!("printer asked to resume");
                             let _ = print.resume(&state).await;
                         }
-                        "cancel" => {
+                        HostAction::Paused => {
+                            info!("printer paused itself");
+                            print.firmware_paused(&state).await;
+                        }
+                        HostAction::Resumed => {
+                            info!("printer resumed itself");
+                            print.firmware_resumed(&state).await;
+                        }
+                        HostAction::Cancel => {
                             info!("printer requested cancel");
                             let _ = print.cancel().await;
                         }
-                        _ => {}
+                        // E.g. "Filament Runout Detected": show it in the status line (the
+                        // raw line reaches the console below).
+                        HostAction::Notification(text) => {
+                            info!(%text, "printer notification");
+                            state.update(move |s| s.display_message = text);
+                        }
+                        HostAction::Other(action) => debug!(%action, "host action ignored"),
                     }
                 }
                 let line = parser::classify(&raw);
@@ -661,36 +713,47 @@ fn is_blocking_command(cmd: &str) -> bool {
             | "G28" | "G29"               // home / bed leveling
             | "G4" | "M400"               // dwell / wait for moves to finish
             | "M226" | "M0" | "M1" | "M600" // wait for pin / pause / filament change
+            | "M602" | "M603" // Prusa resume (reheats) / stop (parks)
     )
 }
 
-/// Send a command with a line number + checksum and wait for `ok`, re-sending on `Resend:`
-/// (or a lost `ok`) and only advancing the line number on success. `line_no` is the number
-/// used for this command (set to 0 before an `M110 N0` reset).
+/// Send `cmd` and wait until the printer has accepted it. Numbered commands are framed
+/// `N<n> … *<checksum>`; unnumbered ones (Prusa control commands) leave the printer's line
+/// counter alone. `Resend:` moves the send cursor (see [`Numbering`]): the line in flight
+/// is re-sent, lines the printer already has are skipped, and lines it discarded are
+/// replayed from history before this command completes. Lost `ok`s and RX timeouts
+/// re-send the current line.
 async fn send_and_wait<W: AsyncWriteExt + Unpin>(
     write: &mut W,
     cmd: &str,
+    numbered: bool,
     ack_rx: &mut mpsc::Receiver<AckEvent>,
     last_seen: &LastSeen,
     stats: &Stats,
-    line_no: &mut u64,
+    numbering: &mut Numbering,
 ) -> Result<()> {
     // Discard any acks left over from a previous command before issuing this one.
     while ack_rx.try_recv().is_ok() {}
 
-    let mut n = *line_no;
-    let mut framed = frame(n, cmd);
-    let blocking = is_blocking_command(cmd);
-    send_framed(write, &framed, stats).await?;
+    let mut pending = numbering.start(cmd, numbered);
+    send_front(write, &pending, stats).await?;
 
+    // Re-sends of the current front line; reset whenever the front advances.
     let mut resends = 0u32;
-    // When we last (re)sent the line — used to detect a lost `ok` on non-blocking commands.
+    // When we last (re)sent the front line — used to detect a lost `ok`.
     let mut sent_at = Instant::now();
     loop {
+        let front = pending.front().context("nothing pending")?;
+        let (front_no, blocking) = (front.number, is_blocking_command(&front.cmd));
         match timeout(POLL_INTERVAL, ack_rx.recv()).await {
             Ok(Some(AckEvent::Ok)) => {
-                *line_no = n + 1; // advance only once the printer accepted the line
-                return Ok(());
+                if numbering.on_ok(&mut pending) == Step::Done {
+                    return Ok(());
+                }
+                // Mid-replay: on to the next line.
+                resends = 0;
+                send_front(write, &pending, stats).await?;
+                sent_at = Instant::now();
             }
             // `busy:` means the printer is actively working (e.g. planner full on slow moves)
             // — real progress, so reset the lost-`ok` timer rather than resending into it.
@@ -698,36 +761,43 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
                 sent_at = Instant::now();
             }
             Ok(Some(AckEvent::Resend(requested))) => {
-                // `Resend: R` means "the next line I expect is R".
-                //
-                // R == n+1: the printer already has our current line N (its ack was lost) —
-                // treat N as accepted and advance to the next command.
-                if requested == n + 1 {
-                    debug!(
-                        requested,
-                        line_no = n,
-                        "printer already has line; advancing"
-                    );
-                    *line_no = n + 1;
-                    return Ok(());
+                let queued = pending.len();
+                match numbering.on_resend(&mut pending, requested) {
+                    Step::Done => {
+                        debug!(requested, "printer already has the line(s); advancing");
+                        return Ok(());
+                    }
+                    Step::Wait => {
+                        debug!(
+                            requested,
+                            "resend request matches our next line; awaiting ok"
+                        );
+                    }
+                    Step::SendFront => {
+                        let new_front = pending.front().and_then(|p| p.number);
+                        if pending.len() > queued {
+                            info!(
+                                from = requested,
+                                lines = pending.len() - queued,
+                                "printer discarded lines; replaying them"
+                            );
+                        } else if new_front != front_no && pending.len() == queued {
+                            warn!(requested, line_no = ?front_no, %cmd, "line-number desync; realigning to printer");
+                        }
+                        if new_front != front_no || pending.len() != queued {
+                            resends = 0;
+                        }
+                        resends += 1;
+                        if resends > 10 {
+                            bail!(
+                                "too many resends for line {front_no:?} (printer wants N{requested}): {cmd}"
+                            );
+                        }
+                        debug!(requested, line_no = ?new_front, attempt = resends, "resending line");
+                        send_front(write, &pending, stats).await?;
+                        sent_at = Instant::now();
+                    }
                 }
-                resends += 1;
-                if resends > 10 {
-                    bail!("too many resends for line N{n} (printer wants N{requested}): {cmd}");
-                }
-                // Otherwise the printer wants line R for our current command: R == n is the
-                // normal checksum-error resend; R far from n is a line-number DESYNC (e.g. the
-                // printer's counter survived our reconnect). Either way, adopt R as our number
-                // and resend this command under it — that realigns us to the printer without
-                // needing an M110 to get through. On the following `ok` we continue from R+1.
-                if requested != n {
-                    warn!(requested, line_no = n, %cmd, "line-number desync; realigning to printer");
-                    n = requested;
-                    framed = frame(n, cmd);
-                }
-                debug!(requested, line_no = n, attempt = resends, "resending line");
-                send_framed(write, &framed, stats).await?;
-                sent_at = Instant::now();
             }
             Ok(Some(AckEvent::RxTimeout)) => {
                 // The printer got only part of this line and dropped it — no `ok` or
@@ -735,11 +805,11 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
                 // This also covers blocking commands, which have no ACK_TIMEOUT: a dropped
                 // M109/G28 would otherwise never be acked.
                 resends += 1;
-                warn!(line_no = n, attempt = resends, %cmd, "printer dropped a partial line (RX timeout); re-sending");
+                warn!(line_no = ?front_no, attempt = resends, %cmd, "printer dropped a partial line (RX timeout); re-sending");
                 if resends > 10 {
-                    bail!("printer dropped line N{n} {resends} times (RX timeout): {cmd}");
+                    bail!("printer dropped line {front_no:?} {resends} times (RX timeout): {cmd}");
                 }
-                send_framed(write, &framed, stats).await?;
+                send_front(write, &pending, stats).await?;
                 sent_at = Instant::now();
             }
             Ok(Some(AckEvent::Error)) => {
@@ -767,15 +837,28 @@ async fn send_and_wait<W: AsyncWriteExt + Unpin>(
                 // the line; the printer re-acks it or answers `Resend: N+1` (handled above).
                 if !blocking && sent_at.elapsed() >= ACK_TIMEOUT {
                     resends += 1;
-                    warn!(line_no = n, attempt = resends, %cmd, "no ok in time; re-sending (lost ok?)");
+                    warn!(line_no = ?front_no, attempt = resends, %cmd, "no ok in time; re-sending (lost ok?)");
                     if resends > 10 {
-                        bail!("no ok after {resends} re-sends for line N{n}: {cmd}");
+                        bail!("no ok after {resends} re-sends for line {front_no:?}: {cmd}");
                     }
-                    send_framed(write, &framed, stats).await?;
+                    send_front(write, &pending, stats).await?;
                     sent_at = Instant::now();
                 }
             }
         }
+    }
+}
+
+/// Write the front pending line, framed if it is numbered.
+async fn send_front<W: AsyncWriteExt + Unpin>(
+    write: &mut W,
+    pending: &VecDeque<Pending>,
+    stats: &Stats,
+) -> Result<()> {
+    let line = pending.front().context("nothing pending")?;
+    match line.number {
+        Some(n) => send_framed(write, &frame(n, &line.cmd), stats).await,
+        None => send_framed(write, &line.cmd, stats).await,
     }
 }
 
@@ -861,22 +944,38 @@ mod tests {
         assert_eq!(got, vec![b"N7 G1 F2400*74\n".to_vec()]);
     }
 
+    /// Numbering that has accepted `G1 X0` … `G1 X<last>` as lines 0..=last.
+    fn numbering_through(last: u64) -> Numbering {
+        let mut nb = Numbering::new();
+        nb.reset();
+        for i in 0..=last {
+            let mut p = nb.start(&format!("G1 X{i}"), true);
+            nb.on_ok(&mut p);
+        }
+        nb
+    }
+
+    fn line(s: &str) -> Vec<u8> {
+        format!("{s}\n").into_bytes()
+    }
+
     #[tokio::test]
     async fn resends_immediately_when_printer_reports_rx_timeout() {
         let (wtx, mut writes) = mpsc::unbounded_channel();
         let (ack_tx, mut ack_rx) = mpsc::channel(8);
         let last_seen: LastSeen = Arc::new(Mutex::new(Instant::now()));
         let stats = Stats::default();
-        let mut line_no = 7;
+        let mut numbering = numbering_through(6);
 
         let mut writer = Recorder(wtx);
         let sender = send_and_wait(
             &mut writer,
             "G1 F2400",
+            true,
             &mut ack_rx,
             &last_seen,
             &stats,
-            &mut line_no,
+            &mut numbering,
         );
         let printer = async {
             let first = writes.recv().await.unwrap();
@@ -892,7 +991,83 @@ mod tests {
                 .expect("line was not re-sent promptly after RX timeout");
         result.unwrap();
         assert_eq!(first, second, "the same framed line is re-sent");
-        assert_eq!(line_no, 8, "line accepted after the re-send");
+        assert_eq!(numbering.next(), 8, "line accepted after the re-send");
+    }
+
+    #[tokio::test]
+    async fn replays_older_lines_when_the_printer_asks_for_them() {
+        let (wtx, mut writes) = mpsc::unbounded_channel();
+        let (ack_tx, mut ack_rx) = mpsc::channel(8);
+        let last_seen: LastSeen = Arc::new(Mutex::new(Instant::now()));
+        let stats = Stats::default();
+        let mut numbering = numbering_through(9);
+
+        let mut writer = Recorder(wtx);
+        let sender = send_and_wait(
+            &mut writer,
+            "G1 X10",
+            true,
+            &mut ack_rx,
+            &last_seen,
+            &stats,
+            &mut numbering,
+        );
+        let printer = async {
+            let mut got = vec![writes.recv().await.unwrap()];
+            // Runout: the printer discarded lines 7.. and wants them again.
+            ack_tx.send(AckEvent::Resend(7)).await.unwrap();
+            for _ in 7..=10 {
+                got.push(writes.recv().await.unwrap());
+                ack_tx.send(AckEvent::Ok).await.unwrap();
+            }
+            got
+        };
+        let (result, got) = timeout(ACK_TIMEOUT / 4, async { tokio::join!(sender, printer) })
+            .await
+            .expect("replay stalled");
+        result.unwrap();
+        let expected: Vec<Vec<u8>> = [(10, "G1 X10"), (7, "G1 X7"), (8, "G1 X8")]
+            .into_iter()
+            .chain([(9, "G1 X9"), (10, "G1 X10")])
+            .map(|(n, c)| line(&frame(n, c)))
+            .collect();
+        assert_eq!(got, expected);
+        assert_eq!(numbering.next(), 11);
+    }
+
+    #[tokio::test]
+    async fn sends_control_commands_without_a_line_number() {
+        let (wtx, mut writes) = mpsc::unbounded_channel();
+        let (ack_tx, mut ack_rx) = mpsc::channel(8);
+        let last_seen: LastSeen = Arc::new(Mutex::new(Instant::now()));
+        let stats = Stats::default();
+        let mut numbering = numbering_through(4);
+
+        let mut writer = Recorder(wtx);
+        let sender = send_and_wait(
+            &mut writer,
+            "M602",
+            false,
+            &mut ack_rx,
+            &last_seen,
+            &stats,
+            &mut numbering,
+        );
+        let printer = async {
+            let first = writes.recv().await.unwrap();
+            // Prusa resume: it rewinds to its saved line, asks for the line we'd send next,
+            // and acks the M602 itself.
+            ack_tx.send(AckEvent::Resend(5)).await.unwrap();
+            ack_tx.send(AckEvent::Ok).await.unwrap();
+            first
+        };
+        let (result, first) = timeout(ACK_TIMEOUT / 4, async { tokio::join!(sender, printer) })
+            .await
+            .expect("control command not acked");
+        result.unwrap();
+        assert_eq!(first, line("M602"));
+        assert!(writes.try_recv().is_err(), "nothing re-sent");
+        assert_eq!(numbering.next(), 5, "line counter untouched");
     }
 
     /// Feed raw printer output through the reader and collect every event it forwards.

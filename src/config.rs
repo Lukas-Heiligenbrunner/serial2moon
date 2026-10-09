@@ -63,6 +63,18 @@ pub struct Config {
     #[arg(long, env = "S2M_MOCK_PRINT_SECONDS", default_value_t = 60)]
     pub mock_print_seconds: u64,
 
+    /// Mock printer only: behave like Prusa firmware — identify as Prusa-Firmware, check
+    /// line numbers strictly, and run M600/M601/M602/M603 with host actions and the
+    /// resend-from-saved-line behavior of a real MK3S.
+    #[arg(long, env = "S2M_MOCK_PRUSA")]
+    pub mock_prusa: bool,
+
+    /// Mock printer only (with --mock-prusa): simulate a filament runout when this line
+    /// number arrives — the firmware discards recent lines, asks to resend them and runs
+    /// an M600 filament change.
+    #[arg(long, env = "S2M_MOCK_RUNOUT_AT")]
+    pub mock_runout_at: Option<u64>,
+
     /// If set, also write logs to `<dir>/serial2moon.log` (in addition to stdout). In the
     /// Pi image this points at Moonraker's logs dir so the log is downloadable in Mainsail.
     #[arg(long, env = "S2M_LOG_DIR")]

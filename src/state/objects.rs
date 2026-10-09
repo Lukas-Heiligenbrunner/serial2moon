@@ -129,6 +129,9 @@ pub struct PrinterState {
     pub mcu_receive_seq: u64,
     /// Serial-link utilization 0.0–1.0, surfaced as the MCU "load".
     pub mcu_load: f64,
+    /// The printer reported pausing by itself (`//action:paused`: M600 filament change,
+    /// runout, M601) and hasn't reported resuming yet.
+    pub firmware_paused: bool,
 
     // Host stats, surfaced as the Klipper `system_stats` object (see `sysstats`).
     /// 1-minute load average.
@@ -199,6 +202,7 @@ impl PrinterState {
             mcu_send_seq: 0,
             mcu_receive_seq: 0,
             mcu_load: 0.0,
+            firmware_paused: false,
             sysload: 0.0,
             cputime: 0.0,
             memavail: 0,
@@ -213,6 +217,11 @@ impl PrinterState {
     /// Forget the last print, like Klipper's `SDCARD_RESET_FILE`: `print_stats` back to
     /// standby and the virtual SD card unloaded. The status line (M117 / active sheet) is
     /// not part of the print and stays.
+    /// Prusa firmware (identified via M115): pause/resume with its own M601/M602.
+    pub fn is_prusa(&self) -> bool {
+        self.mcu_version.starts_with("Prusa-Firmware")
+    }
+
     pub fn reset_print_stats(&mut self) {
         self.print_state = PrintState::Standby;
         self.print_filename.clear();

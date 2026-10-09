@@ -18,7 +18,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Serial for T {}
 /// (0 for the mock, which has no real line rate).
 pub async fn open(config: &Config) -> Result<(Box<dyn Serial>, u32)> {
     match config.transport {
-        TransportKind::Mock => Ok((mock::open(), 0)),
+        TransportKind::Mock => {
+            let options = mock::Options {
+                prusa: config.mock_prusa,
+                runout_at: config.mock_runout_at,
+            };
+            Ok((mock::open(options), 0))
+        }
         TransportKind::Serial => serial::open(config).await,
     }
 }

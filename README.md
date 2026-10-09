@@ -19,8 +19,13 @@ Tested end-to-end on an **Original Prusa i3 MK3S** with real Moonraker + Mainsai
 
 - Live temperatures, fan, and toolhead position / homed axes (tracked from the G-code we
   send, since Marlin doesn't stream position).
-- Print **start / pause / resume / cancel** with byte-accurate progress, plus pause/cancel
-  parking (lift + present bed).
+- Print **start / pause / resume / cancel** with byte-accurate progress. On Prusa firmware,
+  pause is the printer's own (`M601`/`M602`): it parks, cools the nozzle, shows *Print
+  paused* with *Resume* on its LCD, and reheats and continues exactly where it left off.
+  Other Marlin printers are parked from the host (lift + present bed).
+- **Filament change and runout**: `M600` in the G-code and a runout detected by the
+  printer's sensor show as *paused* while you swap filament on the LCD; lines the printer
+  discards on runout (or crash recovery) are re-sent, so nothing is skipped.
 - File upload, print queue, and the console — driven straight from Mainsail.
 - Pause/resume/cancel from the **printer's own LCD** too.
 - **Steel sheets** (Prusa `M850`) auto-discovered and shown as selectable macro buttons.
@@ -116,8 +121,8 @@ editable `serial2moon.conf` shown next to `moonraker.conf` in Mainsail.
 | `--bed-size` / `S2M_BED_SIZE` | `220,220,250` | advertised X,Y,Z limits |
 | `--extruder-max-temp` / `S2M_EXTRUDER_MAX_TEMP` | `300` | bounds the UI temp input |
 | `--bed-max-temp` / `S2M_BED_MAX_TEMP` | `120` | bounds the UI temp input |
-| `--pause-lift` / `S2M_PAUSE_LIFT` | `5` | Z lift (mm) on pause/cancel |
-| `--pause-retract` / `S2M_PAUSE_RETRACT` | `1` | retract (mm) on pause/cancel |
+| `--pause-lift` / `S2M_PAUSE_LIFT` | `5` | Z lift (mm) on pause/cancel (Prusa: passed to `M601`) |
+| `--pause-retract` / `S2M_PAUSE_RETRACT` | `1` | retract (mm) on pause/cancel (Prusa pause: the firmware's own) |
 | `--log-dir` / `S2M_LOG_DIR` | — | also write logs to this dir |
 | `--log-max-size-mb` / `S2M_LOG_MAX_SIZE_MB` | `20` | rotate `serial2moon.log` at this size |
 | `--log-max-files` / `S2M_LOG_MAX_FILES` | `10` | rotated logs kept, gzip-compressed (`0` = none) |

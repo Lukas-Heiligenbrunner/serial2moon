@@ -21,13 +21,25 @@ use crate::state::{PrintState, StateHandle};
 /// on large files); accumulate the budget and sleep in coarser chunks.
 const MIN_PACE_SLEEP: f64 = 0.005;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrintCmd {
     Run,
+    /// The user asked to pause: park (Prusa: M601) and wait for resume.
     Pause,
+    /// The printer paused by itself and parked: just stop sending until it resumes.
+    Hold,
     Cancel,
     /// Hard abort with no clean-up G-code (e.g. the printer reset under us).
     Abort,
+}
+
+/// `watch::Sender::send_if_modified` helper: switch `cmd` from `from` to `to`.
+fn replace_if(cmd: &mut PrintCmd, from: PrintCmd, to: PrintCmd) -> bool {
+    let hit = *cmd == from;
+    if hit {
+        *cmd = to;
+    }
+    hit
 }
 
 /// Wall-clock bookkeeping for one print: time since start and time spent paused. The
@@ -88,7 +100,10 @@ async fn tick_durations(state: StateHandle, clock: SharedClock) {
 
 enum Outcome {
     Completed,
-    Cancelled,
+    /// `in_firmware_pause`: the printer holds the print in its own paused state (M601).
+    Cancelled {
+        in_firmware_pause: bool,
+    },
     Aborted,
 }
 
@@ -190,6 +205,38 @@ impl PrintHandle {
         Ok(())
     }
 
+    /// The printer reported pausing by itself (`//action:paused`: an M600 filament change,
+    /// including one triggered by filament runout, or our own M601). It parked already, so
+    /// only hold the stream; a pause the user asked for stays as it is.
+    pub async fn firmware_paused(&self, state: &StateHandle) {
+        let guard = self.active.lock().await;
+        if let Some(tx) = guard.as_ref() {
+            tx.send_if_modified(|c| replace_if(c, PrintCmd::Run, PrintCmd::Hold));
+        }
+        let printing = guard.is_some();
+        state.update(move |s| {
+            s.firmware_paused = true;
+            if printing {
+                s.print_state = PrintState::Paused;
+            }
+        });
+    }
+
+    /// The printer reported resuming by itself (`//action:resumed`): release a hold. A
+    /// pause the user asked for stays until they resume.
+    pub async fn firmware_resumed(&self, state: &StateHandle) {
+        let guard = self.active.lock().await;
+        let released = guard.as_ref().is_some_and(|tx| {
+            tx.send_if_modified(|c| replace_if(c, PrintCmd::Hold, PrintCmd::Run))
+        });
+        state.update(move |s| {
+            s.firmware_paused = false;
+            if released {
+                s.print_state = PrintState::Printing;
+            }
+        });
+    }
+
     async fn finish(&self, app: &App, result: Result<Outcome>) {
         *self.active.lock().await = None;
         match result {
@@ -201,9 +248,15 @@ impl PrintHandle {
                     s.sd_is_active = false;
                 });
             }
-            Ok(Outcome::Cancelled) => {
-                info!("print cancelled");
-                park(app).await; // lift + present (retract while still warm)
+            Ok(Outcome::Cancelled { in_firmware_pause }) => {
+                info!(in_firmware_pause, "print cancelled");
+                if in_firmware_pause || app.state.snapshot().firmware_paused {
+                    // The printer holds the paused print: its own stop (M603) lifts, parks,
+                    // cools and clears that state. Parking from here would fight it.
+                    let _ = app.serial.send_control("M603").await;
+                } else {
+                    park(app).await; // lift + present (retract while still warm)
+                }
                 // Safety: drop heaters and fan, and release the steppers.
                 let _ = app.serial.send_high("M104 S0").await;
                 let _ = app.serial.send_high("M140 S0").await;
@@ -211,6 +264,7 @@ impl PrintHandle {
                 let _ = app.serial.send_high("M84").await;
                 app.state.update(|s| {
                     s.print_state = PrintState::Cancelled;
+                    s.firmware_paused = false;
                     s.sd_is_active = false;
                     s.extruder_target = 0.0;
                     s.bed_target = 0.0;
@@ -316,29 +370,56 @@ async fn stream_file(
             let cmd = *rx.borrow_and_update();
             match cmd {
                 PrintCmd::Abort => return Ok(Outcome::Aborted),
-                PrintCmd::Cancel => return Ok(Outcome::Cancelled),
+                PrintCmd::Cancel => {
+                    return Ok(Outcome::Cancelled {
+                        in_firmware_pause: false,
+                    });
+                }
                 PrintCmd::Run => break,
-                PrintCmd::Pause => {
-                    // Save where we are, park away from the print, then wait for resume.
+                // Pause: the user asked — park (on a Prusa: the firmware's own pause, M601).
+                // Hold: the printer paused itself (M600 filament change, runout) and parked
+                // already — only stop sending until it reports resuming.
+                PrintCmd::Pause | PrintCmd::Hold => {
                     let snap = app.state.snapshot();
-                    let saved = snap.position;
-                    let abs_e = snap.absolute_extrude;
+                    let (saved, abs_e) = (snap.position, snap.absolute_extrude);
+                    let prusa = snap.is_prusa();
+                    let sent_m601 = cmd == PrintCmd::Pause && prusa;
+                    let host_parked = cmd == PrintCmd::Pause && !prusa;
                     clock.lock().unwrap().pause(Instant::now());
-                    park(app).await;
+                    if sent_m601 {
+                        // The firmware saves its place, lifts, parks, cools the nozzle and
+                        // reports `//action:paused`; its LCD then offers Resume.
+                        let lift = app.config.pause_z_lift;
+                        let _ = app.serial.send_control(format!("M601 Z{lift:.2}")).await;
+                    } else if host_parked {
+                        park(app).await;
+                    }
                     loop {
+                        let in_firmware_pause = sent_m601 || app.state.snapshot().firmware_paused;
                         if rx.changed().await.is_err() {
-                            return Ok(Outcome::Cancelled);
+                            return Ok(Outcome::Cancelled { in_firmware_pause });
                         }
                         let next = *rx.borrow_and_update();
                         match next {
-                            PrintCmd::Pause => continue,
+                            PrintCmd::Pause | PrintCmd::Hold => continue,
                             PrintCmd::Run => {
                                 clock.lock().unwrap().resume(Instant::now());
-                                unpark(app, saved, abs_e).await;
+                                if sent_m601 || (prusa && app.state.snapshot().firmware_paused) {
+                                    // Reheat, return, unretract. Even if its `paused` report
+                                    // hasn't arrived yet: a paused Prusa still executes what
+                                    // it receives, so never stream on without this.
+                                    let _ = app.serial.send_control("M602").await;
+                                } else if host_parked {
+                                    unpark(app, saved, abs_e).await;
+                                }
                                 break;
                             }
                             // Cancel/Abort while paused: leave it parked; finish() handles it.
-                            PrintCmd::Cancel => return Ok(Outcome::Cancelled),
+                            PrintCmd::Cancel => {
+                                let in_firmware_pause =
+                                    sent_m601 || app.state.snapshot().firmware_paused;
+                                return Ok(Outcome::Cancelled { in_firmware_pause });
+                            }
                             PrintCmd::Abort => return Ok(Outcome::Aborted),
                         }
                     }
@@ -456,5 +537,71 @@ mod tests {
         let s = state.snapshot();
         assert_eq!(s.print_state, PrintState::Printing);
         assert_eq!(s.print_filename, "benchy.gcode");
+    }
+
+    /// A handle with an active print whose stream is currently in `cmd`.
+    async fn printing(state: &StateHandle, cmd: PrintCmd) -> PrintHandle {
+        let print_state = if cmd == PrintCmd::Run {
+            PrintState::Printing
+        } else {
+            PrintState::Paused
+        };
+        state.update(move |s| s.print_state = print_state);
+        let handle = PrintHandle::new();
+        *handle.active.lock().await = Some(watch::channel(cmd).0);
+        handle
+    }
+
+    async fn stream_cmd(handle: &PrintHandle) -> PrintCmd {
+        *handle.active.lock().await.as_ref().unwrap().borrow()
+    }
+
+    #[tokio::test]
+    async fn firmware_pause_holds_the_stream_without_parking() {
+        // M600 / runout: the printer parked itself, we must only stop sending.
+        let state = state();
+        let handle = printing(&state, PrintCmd::Run).await;
+        handle.firmware_paused(&state).await;
+        assert_eq!(stream_cmd(&handle).await, PrintCmd::Hold);
+        assert!(
+            eventually(&state, |s| s.print_state == PrintState::Paused
+                && s.firmware_paused)
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn firmware_resume_releases_the_hold() {
+        let state = state();
+        let handle = printing(&state, PrintCmd::Hold).await;
+        state.update(|s| s.firmware_paused = true);
+        handle.firmware_resumed(&state).await;
+        assert_eq!(stream_cmd(&handle).await, PrintCmd::Run);
+        assert!(
+            eventually(&state, |s| s.print_state == PrintState::Printing
+                && !s.firmware_paused)
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn firmware_reports_never_override_a_users_pause() {
+        let state = state();
+        let handle = printing(&state, PrintCmd::Pause).await;
+        handle.firmware_paused(&state).await; // our own M601 being reported back
+        assert_eq!(stream_cmd(&handle).await, PrintCmd::Pause);
+        handle.firmware_resumed(&state).await; // e.g. an M600 finished meanwhile
+        assert_eq!(stream_cmd(&handle).await, PrintCmd::Pause);
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(state.snapshot().print_state, PrintState::Paused);
+    }
+
+    #[tokio::test]
+    async fn firmware_pause_without_a_print_only_records_it() {
+        // E.g. an M600 typed into the console while idle.
+        let state = state();
+        PrintHandle::new().firmware_paused(&state).await;
+        assert!(eventually(&state, |s| s.firmware_paused).await);
+        assert_eq!(state.snapshot().print_state, PrintState::Standby);
     }
 }

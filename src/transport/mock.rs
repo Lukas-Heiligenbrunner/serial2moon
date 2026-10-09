@@ -1,10 +1,11 @@
 //! In-process simulated Marlin printer. Speaks the same line protocol a real printer
 //! does over `tokio::io::duplex`, so it exercises the full serial code path with no hardware.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::time::{MissedTickBehavior, interval, sleep};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 
 use super::Serial;
 
@@ -13,10 +14,21 @@ const HOME_TIME: Duration = Duration::from_millis(2500);
 /// Max simulated heater wait (M109/M190) before giving up and acking anyway.
 const HEAT_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// How the simulated printer behaves.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    /// Behave like Prusa firmware (MK3S): identify as Prusa-Firmware, check line numbers
+    /// strictly (flushing input on a mismatch, as `FlushSerialRequestResend` does), and run
+    /// M600/M601/M602/M603 with host actions and resend-from-saved-line on resume.
+    pub prusa: bool,
+    /// With `prusa`: run out of filament when this line number arrives.
+    pub runout_at: Option<u64>,
+}
+
 /// Open a mock printer; returns the host-side end of the duplex pipe.
-pub fn open() -> Box<dyn Serial> {
+pub fn open(options: Options) -> Box<dyn Serial> {
     let (host, printer) = tokio::io::duplex(8192);
-    tokio::spawn(run(printer));
+    tokio::spawn(run(printer, options));
     Box::new(host)
 }
 
@@ -29,7 +41,10 @@ struct Sim {
     fan: f64,
     pos: [f64; 4],
     absolute: bool,
+    /// M83: E is relative even in absolute mode.
+    rel_e: bool,
     autoreport_secs: u64,
+    prusa: bool,
 }
 
 impl Sim {
@@ -99,10 +114,18 @@ fn line_number(s: &str) -> Option<u64> {
         .ok()
 }
 
-async fn run<S: Serial>(stream: S) {
+async fn run<S: Serial>(stream: S, options: Options) {
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     let mut sim = Sim::new();
+    sim.prusa = options.prusa;
+
+    // Prusa mode: the firmware's line counter (gcode_LastN), the line saved by a pause,
+    // and the position before each recent line (to undo moves a runout discards).
+    let mut last_n: u64 = 0;
+    let mut paused_at: Option<u64> = None;
+    let mut runout_done = false;
+    let mut recent: VecDeque<(u64, [f64; 4])> = VecDeque::new();
 
     let mut ticker = interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -200,6 +223,94 @@ async fn run<S: Serial>(stream: S) {
                     }
                 }
 
+                if options.prusa {
+                    let cmd = strip_framing(raw);
+                    let upper = cmd.to_ascii_uppercase();
+                    let word = upper.split_whitespace().next().unwrap_or("");
+                    if let Some(n) = line_number(raw) {
+                        if word == "M110" {
+                            last_n = parse_axis(&upper, 'N').map_or(n, |v| v as u64);
+                        } else if n != last_n + 1 {
+                            flush_input(&mut lines).await;
+                            let _ = write
+                                .write_all(
+                                    format!("Error:Line Number is not Last Line Number+1, Last Line: {last_n}\nResend: {}\nok\n", last_n + 1)
+                                        .as_bytes(),
+                                )
+                                .await;
+                            continue;
+                        } else if options.runout_at == Some(n) && !runout_done && n > 3 {
+                            // Filament runout: lines n-3..=n were still queued or planned. The
+                            // firmware acks and discards them, returns to where it was, asks
+                            // for them again and runs a filament change before reading on.
+                            runout_done = true;
+                            let from = n - 3;
+                            if let Some(&(_, pos)) = recent.iter().find(|(k, _)| *k == from) {
+                                sim.pos = pos;
+                            }
+                            recent.retain(|(k, _)| *k < from);
+                            last_n = from - 1;
+                            let _ = write
+                                .write_all(b"//action:notification Filament Runout Detected\nok\n")
+                                .await;
+                            sleep(Duration::from_millis(50)).await; // moving back into place
+                            flush_input(&mut lines).await;
+                            let _ = write.write_all(format!("Resend: {from}\nok\n").as_bytes()).await;
+                            filament_change(&mut write).await;
+                            continue;
+                        } else {
+                            last_n = n;
+                            recent.push_back((n, sim.pos));
+                            if recent.len() > 16 {
+                                recent.pop_front();
+                            }
+                        }
+                    }
+                    match word {
+                        "M600" => {
+                            filament_change(&mut write).await;
+                            let _ = write.write_all(b"ok\n").await;
+                            continue;
+                        }
+                        // Acks first, then pauses (saving the last line it got) and reports it.
+                        "M601" => {
+                            let reply: &[u8] = if paused_at.is_none() {
+                                paused_at = Some(last_n);
+                                b"ok\n//action:paused\n"
+                            } else {
+                                b"ok\n"
+                            };
+                            let _ = write.write_all(reply).await;
+                            continue;
+                        }
+                        // Rewinds to the saved line and asks for what follows it, then acks
+                        // the M602 itself.
+                        "M602" => {
+                            if let Some(saved) = paused_at.take() {
+                                last_n = saved;
+                                flush_input(&mut lines).await;
+                                let _ = write
+                                    .write_all(
+                                        format!("Resend: {}\nok\n//action:resumed\nok\n", saved + 1)
+                                            .as_bytes(),
+                                    )
+                                    .await;
+                            } else {
+                                let _ = write.write_all(b"ok\n").await;
+                            }
+                            continue;
+                        }
+                        "M603" => {
+                            paused_at = None;
+                            let _ = write
+                                .write_all(b"//action:cancel\necho:mock: print stopped\nok\n")
+                                .await;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
                 let cmd = strip_framing(raw);
                 let upper = cmd.to_ascii_uppercase();
                 let word = upper.split_whitespace().next().unwrap_or("");
@@ -217,6 +328,22 @@ async fn run<S: Serial>(stream: S) {
             }
         }
     }
+}
+
+/// Discard input received but not yet processed, like the firmware's `MYSERIAL.flush()`
+/// before it requests a resend.
+async fn flush_input<R: AsyncBufRead + Unpin>(lines: &mut Lines<R>) {
+    while let Ok(Ok(Some(_))) = timeout(Duration::from_millis(5), lines.next_line()).await {}
+}
+
+/// Prusa M600 as the host sees it: paused report, user-wait keepalives, resumed report.
+async fn filament_change<W: AsyncWriteExt + Unpin>(write: &mut W) {
+    let _ = write.write_all(b"//action:paused\n").await;
+    for _ in 0..3 {
+        sleep(Duration::from_millis(100)).await;
+        let _ = write.write_all(b"echo:busy: paused for user\n").await;
+    }
+    let _ = write.write_all(b"//action:resumed\n").await;
 }
 
 /// Block (like Marlin's `M109`/`M190`) until the relevant heater reaches its target,
@@ -246,6 +373,10 @@ fn handle(cmd: &str, sim: &mut Sim) -> String {
     let word = upper.split_whitespace().next().unwrap_or("");
 
     match word {
+        "M115" if sim.prusa => "FIRMWARE_NAME:Prusa-Firmware 3.14.1 based on Marlin \
+             FIRMWARE_URL:https://github.com/prusa3d/Prusa-Firmware PROTOCOL_VERSION:1.0 \
+             MACHINE_TYPE:Prusa i3 MK3S EXTRUDER_COUNT:1\nCap:AUTOREPORT_TEMP:1\nok\n"
+            .to_string(),
         "M115" => "FIRMWARE_NAME:Marlin 2.1.2 (serial2moon-mock) SOURCE_CODE_URL:n/a \
              PROTOCOL_VERSION:1.0 MACHINE_TYPE:Mock EXTRUDER_COUNT:1 \
              Cap:AUTOREPORT_TEMP:1 Cap:EEPROM:1\nok\n"
@@ -287,10 +418,14 @@ fn handle(cmd: &str, sim: &mut Sim) -> String {
             sim.absolute = false;
             "ok\n".to_string()
         }
+        "M82" | "M83" => {
+            sim.rel_e = word == "M83";
+            "ok\n".to_string()
+        }
         "G0" | "G1" => {
             for (i, axis) in ['X', 'Y', 'Z', 'E'].into_iter().enumerate() {
                 if let Some(v) = parse_axis(&upper, axis) {
-                    if sim.absolute {
+                    if sim.absolute && !(i == 3 && sim.rel_e) {
                         sim.pos[i] = v;
                     } else {
                         sim.pos[i] += v;
@@ -299,10 +434,13 @@ fn handle(cmd: &str, sim: &mut Sim) -> String {
             }
             "ok\n".to_string()
         }
-        "M114" => format!(
-            "X:{:.2} Y:{:.2} Z:{:.2} E:{:.2} Count A:0 B:0 C:0\nok\n",
-            sim.pos[0], sim.pos[1], sim.pos[2], sim.pos[3]
-        ),
+        // Prusa's format (no `A:`/`B:` stepper counts, which would read as a bed temp).
+        "M114" => {
+            let [x, y, z, e] = sim.pos;
+            format!(
+                "X:{x:.2} Y:{y:.2} Z:{z:.2} E:{e:.2} Count X: {x:.2} Y:{y:.2} Z:{z:.2} E:{e:.2}\nok\n"
+            )
+        }
         "M112" => "ok\n".to_string(),
         "M850" => {
             // Mimic Prusa's sheet report: sheets 0 and 1 calibrated, the rest uncalibrated.
