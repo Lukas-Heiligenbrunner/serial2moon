@@ -69,6 +69,7 @@ struct Cmd {
 }
 
 /// Ack-relevant events the reader forwards to the supervisor.
+#[derive(Debug)]
 enum AckEvent {
     Ok,
     Busy,
@@ -376,7 +377,7 @@ async fn run_connection(
                 let _ = send!("M110 N0");
                 let _ = send!("M155 S1");
                 motion = Motion::new();
-                push_motion(state, &motion);
+                push_motion(state, &motion, 0.0);
             }
             Some(kind) = api_restart_rx.recv() => match kind {
                 // FIRMWARE_RESTART: tear the link down so the supervisor reopens the
@@ -393,7 +394,7 @@ async fn run_connection(
                     let _ = send!("M110 N0");
                     let _ = send!("M155 S1");
                     motion = Motion::new();
-                    push_motion(state, &motion);
+                    push_motion(state, &motion, 0.0);
                     state.update(|s| {
                         s.klippy_state = KlippyState::Ready;
                         s.state_message = "Printer is ready".to_string();
@@ -403,8 +404,9 @@ async fn run_connection(
             cmd = recv_cmd(high_rx, low_rx) => {
                 let Some(cmd) = cmd else { break ConnectionEnd::Shutdown };
                 let result = send!(&cmd.line);
+                let extruded_before = motion.extruded();
                 if result.is_ok() && motion.apply(&cmd.line) {
-                    push_motion(state, &motion);
+                    push_motion(state, &motion, motion.extruded() - extruded_before);
                 }
                 let _ = cmd.ack.send(result);
             }
@@ -442,12 +444,18 @@ async fn recv_cmd(
     }
 }
 
-fn push_motion(state: &StateHandle, m: &Motion) {
+/// Publish the tracked motion. `extruded` is the net E movement of the line just sent; it
+/// counts toward `filament_used` while a print is active — including while paused, so the
+/// park retract and the resume unretract cancel out.
+fn push_motion(state: &StateHandle, m: &Motion, extruded: f64) {
     let pos = m.position();
     let absolute = m.absolute();
     let abs_extrude = m.absolute_extrude();
     let homed = m.homed_axes();
     state.update(move |s| {
+        if matches!(s.print_state, PrintState::Printing | PrintState::Paused) {
+            s.filament_used += extruded;
+        }
         s.position = pos;
         s.gcode_position = pos;
         s.absolute_coordinates = absolute;
@@ -492,6 +500,9 @@ async fn reader<R: AsyncReadExt + Unpin>(
 ) {
     let mut lines = BufReader::new(read).lines();
     let mut identified = false;
+    // Marlin/Prusa print `Resend: N` and an `ok` back to back (one printf), so the line right
+    // after a `Resend:` is that request's own `ok` — never the ack of a command.
+    let mut after_resend = false;
     loop {
         match lines.next_line().await {
             Ok(Some(raw)) => {
@@ -553,7 +564,15 @@ async fn reader<R: AsyncReadExt + Unpin>(
                         _ => {}
                     }
                 }
-                match parser::classify(&raw) {
+                let line = parser::classify(&raw);
+                let follows_resend =
+                    std::mem::replace(&mut after_resend, matches!(line, Line::Resend(_)));
+                match line {
+                    Line::Ok(_) if follows_resend => {
+                        // Forwarded, this would complete the NEXT command before the printer
+                        // has even seen it, leaving one line permanently in flight.
+                        debug!("ok of the resend request (not an ack)");
+                    }
                     Line::Ok(t) => {
                         if !t.is_empty() {
                             apply_temps(&state, t);
@@ -876,9 +895,8 @@ mod tests {
         assert_eq!(line_no, 8, "line accepted after the re-send");
     }
 
-    #[tokio::test]
-    async fn reader_forwards_prusa_busy_and_rx_timeout() {
-        let input: &[u8] = b"echo:busy: processing\nRX timeout\nok\n";
+    /// Feed raw printer output through the reader and collect every event it forwards.
+    async fn read_events(input: &'static [u8]) -> Vec<AckEvent> {
         let state = StateHandle::spawn(PrinterState::new(
             [250.0, 210.0, 210.0, 0.0],
             200.0,
@@ -890,7 +908,7 @@ mod tests {
             false,
         ));
         let (console, _) = broadcast::channel(16);
-        let (ack_tx, mut ack_rx) = mpsc::channel(8);
+        let (ack_tx, mut ack_rx) = mpsc::channel(64);
         let (restart_tx, _restart_rx) = mpsc::unbounded_channel();
         reader(
             input,
@@ -903,9 +921,74 @@ mod tests {
             Arc::new(Stats::default()),
         )
         .await;
+        let mut events = Vec::new();
+        while let Some(e) = ack_rx.recv().await {
+            events.push(e);
+        }
+        events
+    }
 
-        assert!(matches!(ack_rx.recv().await, Some(AckEvent::Busy)));
-        assert!(matches!(ack_rx.recv().await, Some(AckEvent::RxTimeout)));
-        assert!(matches!(ack_rx.recv().await, Some(AckEvent::Ok)));
+    #[tokio::test]
+    async fn counts_extrusion_as_filament_used_only_during_a_print() {
+        let state = StateHandle::spawn(PrinterState::new(
+            [250.0, 210.0, 210.0, 0.0],
+            200.0,
+            1000.0,
+            300.0,
+            120.0,
+            "./gcodes".into(),
+            vec![],
+            false,
+        ));
+        let m = Motion::new();
+        push_motion(&state, &m, 5.0); // purging by hand while idle is not part of a print
+        state.update(|s| s.print_state = PrintState::Printing);
+        push_motion(&state, &m, 1.5);
+        push_motion(&state, &m, -0.5); // retracts subtract, like Klipper's net E
+        state.update(|s| s.print_state = PrintState::Paused);
+        push_motion(&state, &m, 0.25); // pause park/unpark moves happen while paused
+
+        let mut used = f64::NAN;
+        for _ in 0..200 {
+            used = state.snapshot().filament_used;
+            if (used - 1.25).abs() < 1e-9 {
+                return;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+        panic!("filament_used = {used}, expected 1.25");
+    }
+
+    #[tokio::test]
+    async fn reader_forwards_prusa_busy_and_rx_timeout() {
+        let events = read_events(b"echo:busy: processing\nRX timeout\nok\n").await;
+        assert!(
+            matches!(
+                events[..],
+                [AckEvent::Busy, AckEvent::RxTimeout, AckEvent::Ok]
+            ),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_drops_the_ok_that_belongs_to_a_resend_request() {
+        // Prusa/Marlin print `Resend: N` and an `ok` together. That `ok` answers the resend
+        // request, not a line: forwarded, it would be taken as the ack of the next command.
+        let events = read_events(b"Resend: 5\nok\nok\n").await;
+        assert!(
+            matches!(events[..], [AckEvent::Resend(5), AckEvent::Ok]),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_keeps_an_ok_that_does_not_directly_follow_a_resend() {
+        // Firmware without the trailing `ok`: the next `ok` is a genuine ack.
+        let events = read_events(b"Resend: 5\nT:20.0 /0.0 B:20.0 /0.0\nok\n").await;
+        assert!(
+            matches!(events[..], [AckEvent::Resend(5), AckEvent::Ok]),
+            "{events:?}"
+        );
     }
 }

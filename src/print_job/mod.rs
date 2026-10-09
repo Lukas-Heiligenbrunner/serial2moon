@@ -30,6 +30,62 @@ enum PrintCmd {
     Abort,
 }
 
+/// Wall-clock bookkeeping for one print: time since start and time spent paused. The
+/// caller passes the current time in, so the arithmetic is testable without waiting.
+struct PrintClock {
+    start: Instant,
+    paused: Duration,
+    paused_since: Option<Instant>,
+}
+
+impl PrintClock {
+    fn new(now: Instant) -> Self {
+        PrintClock {
+            start: now,
+            paused: Duration::ZERO,
+            paused_since: None,
+        }
+    }
+
+    fn pause(&mut self, now: Instant) {
+        self.paused_since.get_or_insert(now);
+    }
+
+    fn resume(&mut self, now: Instant) {
+        if let Some(since) = self.paused_since.take() {
+            self.paused += now.saturating_duration_since(since);
+        }
+    }
+
+    /// `(total, paused)` seconds at `now`; an ongoing pause counts as paused.
+    fn times(&self, now: Instant) -> (f64, f64) {
+        let ongoing = self
+            .paused_since
+            .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+        (
+            now.saturating_duration_since(self.start).as_secs_f64(),
+            (self.paused + ongoing).as_secs_f64(),
+        )
+    }
+}
+
+type SharedClock = Arc<std::sync::Mutex<PrintClock>>;
+
+fn publish_durations(state: &StateHandle, clock: &SharedClock) {
+    let (total, paused) = clock.lock().unwrap().times(Instant::now());
+    state.update(move |s| s.update_durations(total, paused));
+}
+
+/// Keep the durations moving once a second, also through long heat-up waits and pauses
+/// when no lines are sent.
+async fn tick_durations(state: StateHandle, clock: SharedClock) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+        publish_durations(&state, &clock);
+    }
+}
+
 enum Outcome {
     Completed,
     Cancelled,
@@ -68,23 +124,22 @@ impl PrintHandle {
         let fname = filename.to_string();
         let disp = path.to_string_lossy().to_string();
         app.state.update(move |s| {
+            s.reset_print_stats();
             s.print_state = PrintState::Printing;
             s.print_filename = fname;
-            s.print_message = String::new();
             s.sd_file_path = Some(disp);
             s.sd_file_size = size;
-            s.sd_file_position = 0;
-            s.sd_progress = 0.0;
             s.sd_is_active = true;
-            s.total_duration = 0.0;
-            s.print_duration = 0.0;
-            s.filament_used = 0.0;
         });
 
         let app = app.clone();
         let handle = self.clone();
+        let clock: SharedClock = Arc::new(std::sync::Mutex::new(PrintClock::new(Instant::now())));
         tokio::spawn(async move {
-            let result = stream_file(&app, &path, size, rx).await;
+            let ticker = tokio::spawn(tick_durations(app.state.clone(), clock.clone()));
+            let result = stream_file(&app, &path, size, rx, &clock).await;
+            ticker.abort();
+            publish_durations(&app.state, &clock); // final values, as the print ended
             handle.finish(&app, result).await;
         });
         Ok(())
@@ -120,6 +175,19 @@ impl PrintHandle {
         if let Some(tx) = self.active.lock().await.as_ref() {
             let _ = tx.send(PrintCmd::Abort);
         }
+    }
+
+    /// Klipper `SDCARD_RESET_FILE` (Mainsail's "clear" after a print): back to standby.
+    /// Unlike Klipper it refuses to touch an active print rather than stopping it.
+    pub async fn reset_file(&self, state: &StateHandle) -> Result<()> {
+        // Hold the lock across the update so a print starting concurrently is ordered after.
+        let guard = self.active.lock().await;
+        if guard.is_some() {
+            bail!("a print is in progress; cancel it first");
+        }
+        state.update(|s| s.reset_print_stats());
+        drop(guard);
+        Ok(())
     }
 
     async fn finish(&self, app: &App, result: Result<Outcome>) {
@@ -228,6 +296,7 @@ async fn stream_file(
     path: &Path,
     size: u64,
     mut rx: watch::Receiver<PrintCmd>,
+    clock: &SharedClock,
 ) -> Result<Outcome> {
     let file = File::open(path).await?;
     let mut lines = BufReader::new(file).lines();
@@ -254,6 +323,7 @@ async fn stream_file(
                     let snap = app.state.snapshot();
                     let saved = snap.position;
                     let abs_e = snap.absolute_extrude;
+                    clock.lock().unwrap().pause(Instant::now());
                     park(app).await;
                     loop {
                         if rx.changed().await.is_err() {
@@ -263,6 +333,7 @@ async fn stream_file(
                         match next {
                             PrintCmd::Pause => continue,
                             PrintCmd::Run => {
+                                clock.lock().unwrap().resume(Instant::now());
                                 unpark(app, saved, abs_e).await;
                                 break;
                             }
@@ -288,11 +359,10 @@ async fn stream_file(
             0.0
         };
         let filepos = pos.min(size);
+        // (Durations are published by `tick_durations`.)
         app.state.update(move |s| {
             s.sd_file_position = filepos;
             s.sd_progress = progress;
-            s.print_duration = elapsed;
-            s.total_duration = elapsed;
         });
 
         // Pace to the target duration: sleep when we're ahead of schedule.
@@ -305,4 +375,86 @@ async fn stream_file(
     }
 
     Ok(Outcome::Completed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::PrinterState;
+
+    fn state() -> StateHandle {
+        StateHandle::spawn(PrinterState::new(
+            [250.0, 210.0, 210.0, 0.0],
+            200.0,
+            1000.0,
+            300.0,
+            120.0,
+            "./gcodes".into(),
+            vec![],
+            false,
+        ))
+    }
+
+    /// State updates are applied asynchronously by the state actor: wait until `pred` holds.
+    async fn eventually(state: &StateHandle, pred: impl Fn(&PrinterState) -> bool) -> bool {
+        for _ in 0..200 {
+            if pred(&state.snapshot()) {
+                return true;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+        false
+    }
+
+    #[test]
+    fn print_clock_separates_paused_time() {
+        let t0 = Instant::now();
+        let at = |secs| t0 + Duration::from_secs(secs);
+        let mut clock = PrintClock::new(t0);
+        clock.pause(at(10));
+        clock.pause(at(12)); // a repeated pause doesn't restart the pause
+        clock.resume(at(25));
+        assert_eq!(clock.times(at(40)), (40.0, 15.0));
+        clock.pause(at(50));
+        assert_eq!(clock.times(at(60)), (60.0, 25.0), "an ongoing pause counts");
+        clock.resume(at(70));
+        clock.resume(at(80)); // resume without a pause is a no-op
+        assert_eq!(clock.times(at(90)), (90.0, 35.0));
+    }
+
+    #[tokio::test]
+    async fn reset_file_clears_a_finished_print() {
+        let state = state();
+        state.update(|s| {
+            s.print_state = PrintState::Complete;
+            s.print_filename = "benchy.gcode".into();
+        });
+        assert!(eventually(&state, |s| s.print_state == PrintState::Complete).await);
+
+        PrintHandle::new().reset_file(&state).await.unwrap();
+
+        assert!(
+            eventually(&state, |s| s.print_state == PrintState::Standby
+                && s.print_filename.is_empty())
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_file_refuses_while_a_print_is_active() {
+        let state = state();
+        state.update(|s| {
+            s.print_state = PrintState::Printing;
+            s.print_filename = "benchy.gcode".into();
+        });
+        let handle = PrintHandle::new();
+        let (tx, _rx) = watch::channel(PrintCmd::Run);
+        *handle.active.lock().await = Some(tx);
+
+        assert!(handle.reset_file(&state).await.is_err());
+        sleep(Duration::from_millis(50)).await;
+        let s = state.snapshot();
+        assert_eq!(s.print_state, PrintState::Printing);
+        assert_eq!(s.print_filename, "benchy.gcode");
+    }
 }

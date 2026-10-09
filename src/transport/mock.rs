@@ -146,9 +146,10 @@ async fn run<S: Serial>(stream: S) {
                 if raw.is_empty() { continue; }
 
                 // Once, reject the first numbered command the way Prusa/Marlin does on a
-                // corrupted line: an `Error:` line *followed by* `Resend: N`, with no `ok`.
-                // This exercises the host's recovery (and that it does NOT treat the error
-                // as an ack, which would desync the line counter).
+                // corrupted line: `Error:`, then `Resend: N` immediately followed by the
+                // request's own `ok`. This exercises the host's recovery: neither the error
+                // nor that `ok` may count as the line's ack, or the line counter desyncs.
+                // (Every `Resend:` below carries its `ok` too, as on the real firmware.)
                 if force_resend && !did_resend && let Some(n) = line_number(raw) && n >= 1 {
                     did_resend = true;
                     let _ = write
@@ -156,7 +157,7 @@ async fn run<S: Serial>(stream: S) {
                             format!("Error:checksum mismatch, Last Line: {}\n", n - 1).as_bytes(),
                         )
                         .await;
-                    let _ = write.write_all(format!("Resend: {n}\n").as_bytes()).await;
+                    let _ = write.write_all(format!("Resend: {n}\nok\n").as_bytes()).await;
                     continue;
                 }
 
@@ -174,7 +175,7 @@ async fn run<S: Serial>(stream: S) {
                                     .as_bytes(),
                             )
                             .await;
-                        let _ = write.write_all(format!("Resend: {}\n", prev + 1).as_bytes()).await;
+                        let _ = write.write_all(format!("Resend: {}\nok\n", prev + 1).as_bytes()).await;
                         continue;
                     }
                 }
@@ -183,7 +184,7 @@ async fn run<S: Serial>(stream: S) {
                 // trailing `ok`; on the host's re-send of that line, report `Resend: N+1`.
                 if drop_ok && let Some(n) = line_number(raw) {
                     if dropped == Some(n) {
-                        let _ = write.write_all(format!("Resend: {}\n", n + 1).as_bytes()).await;
+                        let _ = write.write_all(format!("Resend: {}\nok\n", n + 1).as_bytes()).await;
                         continue;
                     }
                     if dropped.is_none() && n >= 1 {

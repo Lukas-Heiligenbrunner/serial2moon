@@ -98,6 +98,8 @@ pub struct PrinterState {
     pub print_message: String,
     pub total_duration: f64,
     pub print_duration: f64,
+    /// Active (unpaused) time before the first extrusion; excluded from `print_duration`.
+    pub print_init_duration: f64,
     pub filament_used: f64,
     pub sd_file_path: Option<String>,
     pub sd_progress: f64,
@@ -177,6 +179,7 @@ impl PrinterState {
             print_message: String::new(),
             total_duration: 0.0,
             print_duration: 0.0,
+            print_init_duration: 0.0,
             filament_used: 0.0,
             sd_file_path: None,
             sd_progress: 0.0,
@@ -205,6 +208,37 @@ impl PrinterState {
                 .collect(),
             host_control,
         }
+    }
+
+    /// Forget the last print, like Klipper's `SDCARD_RESET_FILE`: `print_stats` back to
+    /// standby and the virtual SD card unloaded. The status line (M117 / active sheet) is
+    /// not part of the print and stays.
+    pub fn reset_print_stats(&mut self) {
+        self.print_state = PrintState::Standby;
+        self.print_filename.clear();
+        self.print_message.clear();
+        self.total_duration = 0.0;
+        self.print_duration = 0.0;
+        self.print_init_duration = 0.0;
+        self.filament_used = 0.0;
+        self.current_layer = None;
+        self.total_layer = None;
+        self.sd_file_path = None;
+        self.sd_progress = 0.0;
+        self.sd_is_active = false;
+        self.sd_file_position = 0;
+        self.sd_file_size = 0;
+    }
+
+    /// Set the print's durations from its wall-clock `total` and `paused` seconds the way
+    /// Klipper's print_stats does: `print_duration` excludes pauses and everything before
+    /// the first extrusion (heating, homing) — what slicer estimates and Mainsail's ETA assume.
+    pub fn update_durations(&mut self, total: f64, paused: f64) {
+        if self.filament_used < 1e-7 {
+            self.print_init_duration = total - paused;
+        }
+        self.total_duration = total;
+        self.print_duration = total - paused - self.print_init_duration;
     }
 
     fn xyz(p: &[f64; 4]) -> Value {
@@ -464,4 +498,87 @@ pub fn sheet_macro_name(label: &str) -> String {
 
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> PrinterState {
+        PrinterState::new(
+            [250.0, 210.0, 210.0, 0.0],
+            200.0,
+            1000.0,
+            300.0,
+            120.0,
+            "./gcodes".into(),
+            vec![],
+            false,
+        )
+    }
+
+    #[test]
+    fn reset_print_stats_returns_to_standby_like_klipper() {
+        let mut s = state();
+        s.print_state = PrintState::Complete;
+        s.print_filename = "benchy.gcode".into();
+        s.print_message = "done".into();
+        s.total_duration = 3600.0;
+        s.print_duration = 3500.0;
+        s.filament_used = 1234.5;
+        s.sd_file_path = Some("/opt/printer_data/gcodes/benchy.gcode".into());
+        s.sd_progress = 1.0;
+        s.sd_file_position = 999;
+        s.sd_file_size = 999;
+        s.current_layer = Some(10);
+        s.total_layer = Some(10);
+        s.display_message = "Active sheet: Smooth1".into();
+
+        s.reset_print_stats();
+
+        let st = s.full_status();
+        let ps = &st["print_stats"];
+        assert_eq!(ps["state"], "standby");
+        assert_eq!(ps["filename"], "");
+        assert_eq!(ps["message"], "");
+        assert_eq!(ps["total_duration"], 0.0);
+        assert_eq!(ps["print_duration"], 0.0);
+        assert_eq!(ps["filament_used"], 0.0);
+        assert_eq!(
+            ps["info"],
+            json!({ "total_layer": null, "current_layer": null })
+        );
+        let sd = &st["virtual_sdcard"];
+        assert_eq!(sd["file_path"], Value::Null);
+        assert_eq!(sd["progress"], 0.0);
+        assert_eq!(sd["file_position"], 0);
+        assert_eq!(sd["file_size"], 0);
+        // The status line (active steel sheet / M117) is not part of the print.
+        assert_eq!(st["display_status"]["message"], "Active sheet: Smooth1");
+    }
+
+    #[test]
+    fn print_duration_excludes_pauses_and_time_before_first_extrusion() {
+        let mut s = state();
+        // Heating and homing: nothing extruded yet, so none of it is print time (Klipper).
+        s.update_durations(120.0, 0.0);
+        assert_eq!((s.total_duration, s.print_duration), (120.0, 0.0));
+        s.filament_used = 3.2;
+        s.update_durations(300.0, 0.0);
+        assert_eq!((s.total_duration, s.print_duration), (300.0, 180.0));
+        // A 60 s pause counts toward the total only.
+        s.update_durations(400.0, 60.0);
+        assert_eq!((s.total_duration, s.print_duration), (400.0, 220.0));
+    }
+
+    #[test]
+    fn reset_print_stats_restarts_duration_tracking() {
+        let mut s = state();
+        s.update_durations(120.0, 0.0);
+        s.filament_used = 1.0;
+        s.reset_print_stats();
+        s.filament_used = 1.0; // extruding right away this time
+        s.update_durations(30.0, 0.0);
+        assert_eq!(s.print_duration, 30.0, "no leftover pre-extrusion time");
+    }
 }

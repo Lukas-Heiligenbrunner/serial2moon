@@ -11,6 +11,9 @@ pub struct Motion {
     abs_extrude: bool,
     pos: [f64; 4], // X, Y, Z, E
     homed: [bool; 3],
+    /// Net filament moved by the extruder (mm): retracts subtract, `G92 E` re-zeroing
+    /// doesn't count. Differences of this feed Klipper's `print_stats.filament_used`.
+    extruded: f64,
 }
 
 impl Default for Motion {
@@ -20,6 +23,7 @@ impl Default for Motion {
             abs_extrude: true,
             pos: [0.0; 4],
             homed: [false; 3],
+            extruded: 0.0,
         }
     }
 }
@@ -31,6 +35,10 @@ impl Motion {
 
     pub fn position(&self) -> [f64; 4] {
         self.pos
+    }
+
+    pub fn extruded(&self) -> f64 {
+        self.extruded
     }
 
     pub fn absolute(&self) -> bool {
@@ -111,7 +119,9 @@ impl Motion {
                     }
                 }
                 if let Some(v) = axis_value(&up, 'E') {
-                    self.pos[3] = if self.abs_extrude { v } else { self.pos[3] + v };
+                    let e = if self.abs_extrude { v } else { self.pos[3] + v };
+                    self.extruded += e - self.pos[3];
+                    self.pos[3] = e;
                     changed = true;
                 }
                 changed
@@ -164,6 +174,21 @@ mod tests {
         assert_eq!(m.position()[3], 0.0);
         m.apply("G1 E5");
         assert_eq!(m.position()[3], 5.0);
+    }
+
+    #[test]
+    fn tracks_net_extrusion_in_both_e_modes() {
+        let mut m = Motion::new();
+        m.apply("M83"); // relative E (PrusaSlicer's default)
+        m.apply("G1 X5 E1.0");
+        m.apply("G1 E-0.8"); // retract
+        m.apply("G1 E0.8"); // unretract
+        assert!((m.extruded() - 1.0).abs() < 1e-9, "{}", m.extruded());
+        m.apply("M82"); // absolute E
+        m.apply("G92 E0"); // re-zeroing the E counter is not a movement
+        m.apply("G1 X10 E2.5");
+        m.apply("G1 X20 E4.0");
+        assert!((m.extruded() - 5.0).abs() < 1e-9, "{}", m.extruded());
     }
 
     #[test]

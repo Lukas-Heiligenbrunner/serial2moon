@@ -49,6 +49,7 @@ async fn execute_line(app: &App, line: &str) -> Result<()> {
         "PAUSE" => app.print.pause(&app.state).await?,
         "RESUME" => app.print.resume(&app.state).await?,
         "CANCEL_PRINT" => app.print.cancel().await?,
+        "SDCARD_RESET_FILE" => app.print.reset_file(&app.state).await?,
 
         // ---- Restart (also reachable via the gcode/restart API endpoints) ----
         "RESTART" => app.serial.restart().await?,
@@ -166,6 +167,10 @@ pub fn help_map(state: &PrinterState) -> Map<String, Value> {
         (
             "SDCARD_PRINT_FILE",
             "Loads a SD file and starts the print. May include files in subdirectories.",
+        ),
+        (
+            "SDCARD_RESET_FILE",
+            "Clears the finished print's state (refused while printing)",
         ),
         ("SET_HEATER_TEMPERATURE", "Sets a heater temperature"),
         ("TURN_OFF_HEATERS", "Turn off all heaters"),
@@ -426,6 +431,7 @@ mod tests {
             "RESUME",
             "CANCEL_PRINT",
             "SDCARD_PRINT_FILE",
+            "SDCARD_RESET_FILE",
             "HELP",
         ] {
             assert!(
