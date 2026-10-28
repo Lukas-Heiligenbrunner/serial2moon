@@ -61,6 +61,17 @@ pub struct Sheet {
     pub z: Option<f64>,
 }
 
+/// Which advertised limits the user set explicitly (see `PrinterState::pinned_limits`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PinnedLimits {
+    /// Axis travel limits (`--bed-size`).
+    pub area: bool,
+    /// `--max-velocity`.
+    pub velocity: bool,
+    /// `--max-accel`.
+    pub accel: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct PrinterState {
     pub klippy_state: KlippyState,
@@ -91,6 +102,11 @@ pub struct PrinterState {
     pub axis_maximum: [f64; 4],
     pub max_velocity: f64,
     pub max_accel: f64,
+    /// Limits set explicitly by the user (CLI/env). The printer's own reports (M115
+    /// geometry, M503) replace only the limits that are NOT pinned here.
+    pub pinned_limits: PinnedLimits,
+    /// Extended M115 capabilities (`Cap:NAME:0|1`), as reported by the printer.
+    pub caps: BTreeMap<String, bool>,
 
     // Print job
     pub print_state: PrintState,
@@ -177,6 +193,8 @@ impl PrinterState {
             axis_maximum,
             max_velocity,
             max_accel,
+            pinned_limits: PinnedLimits::default(),
+            caps: BTreeMap::new(),
             print_state: PrintState::Standby,
             print_filename: String::new(),
             print_message: String::new(),
@@ -220,6 +238,29 @@ impl PrinterState {
     /// Prusa firmware (identified via M115): pause/resume with its own M601/M602.
     pub fn is_prusa(&self) -> bool {
         self.mcu_version.starts_with("Prusa-Firmware")
+    }
+
+    /// Adopt the printer's travel limits (M115 geometry report) unless the user pinned them.
+    pub fn apply_area(&mut self, min: [f64; 3], max: [f64; 3]) {
+        if self.pinned_limits.area {
+            return;
+        }
+        self.axis_minimum[..3].copy_from_slice(&min);
+        self.axis_maximum[..3].copy_from_slice(&max);
+    }
+
+    /// Adopt the printer's XY max feedrate (M203) unless the user pinned `max_velocity`.
+    pub fn apply_max_feedrate(&mut self, x: f64, y: f64) {
+        if !self.pinned_limits.velocity && x > 0.0 && y > 0.0 {
+            self.max_velocity = x.min(y);
+        }
+    }
+
+    /// Adopt the printer's default print acceleration (M204) unless the user pinned `max_accel`.
+    pub fn apply_accel(&mut self, accel: f64) {
+        if !self.pinned_limits.accel && accel > 0.0 {
+            self.max_accel = accel;
+        }
     }
 
     pub fn reset_print_stats(&mut self) {
@@ -524,6 +565,29 @@ mod tests {
             vec![],
             false,
         )
+    }
+
+    #[test]
+    fn printer_limits_replace_defaults_but_not_user_settings() {
+        let mut s = state();
+        s.apply_area([-5.0, 0.0, 0.0], [400.0, 410.0, 500.0]);
+        s.apply_max_feedrate(300.0, 250.0);
+        s.apply_accel(1500.0);
+        assert_eq!(s.axis_minimum, [-5.0, 0.0, 0.0, 0.0]);
+        assert_eq!(s.axis_maximum, [400.0, 410.0, 500.0, 0.0]);
+        assert_eq!((s.max_velocity, s.max_accel), (250.0, 1500.0));
+
+        let mut s = state();
+        s.pinned_limits = PinnedLimits {
+            area: true,
+            velocity: true,
+            accel: true,
+        };
+        s.apply_area([-5.0, 0.0, 0.0], [400.0, 410.0, 500.0]);
+        s.apply_max_feedrate(300.0, 250.0);
+        s.apply_accel(1500.0);
+        assert_eq!(s.axis_maximum, [250.0, 210.0, 210.0, 0.0]);
+        assert_eq!((s.max_velocity, s.max_accel), (200.0, 1000.0));
     }
 
     #[test]

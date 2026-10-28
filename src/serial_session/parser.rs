@@ -227,9 +227,113 @@ pub fn parse_sheet(line: &str) -> Option<(u8, String, f64, bool)> {
     Some((id, label?, z?, active))
 }
 
+/// Parse an extended M115 capability line, e.g. `Cap:AUTOREPORT_POS:1` -> `("AUTOREPORT_POS", true)`.
+pub fn parse_cap(line: &str) -> Option<(String, bool)> {
+    let (name, val) = line.trim().strip_prefix("Cap:")?.rsplit_once(':')?;
+    if name.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), val.trim() == "1"))
+}
+
+/// Parse Marlin's M115 geometry report (M115_GEOMETRY_REPORT) into the travel limits
+/// `(min, max)` for X, Y, Z, e.g.
+/// `area:{full:{min:{x:0.00,y:0.00,z:0.00},max:{x:220.00,y:220.00,z:250.00}},work:{...}}`.
+pub fn parse_area(line: &str) -> Option<([f64; 3], [f64; 3])> {
+    let full = line.trim().strip_prefix("area:{full:{")?;
+    let axes = |key: &str| -> Option<[f64; 3]> {
+        let body = full.split_once(key)?.1.split_once('}')?.0;
+        let mut out = [None; 3];
+        for pair in body.split(',') {
+            let (k, v) = pair.split_once(':')?;
+            let i = match k.trim() {
+                "x" => 0,
+                "y" => 1,
+                "z" => 2,
+                _ => continue,
+            };
+            out[i] = v.trim().parse::<f64>().ok();
+        }
+        Some([out[0]?, out[1]?, out[2]?])
+    };
+    Some((axes("min:{")?, axes("max:{")?))
+}
+
+/// A motion setting from the printer's `M503` report.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Setting {
+    /// `M203 X.. Y..`: max feedrates (mm/s).
+    MaxFeedrate { x: f64, y: f64 },
+    /// `M204 P..` (or the older `M204 S..`): default print acceleration (mm/s²).
+    Accel(f64),
+}
+
+/// Parse one `M503` report line (`echo:  M203 X300.00 Y300.00 Z5.00 E25.00`).
+pub fn parse_setting(line: &str) -> Option<Setting> {
+    let line = line.trim();
+    let body = line.strip_prefix("echo:").unwrap_or(line).trim();
+    let mut tokens = body.split_whitespace();
+    let code = tokens.next()?;
+    let param = |p: char| {
+        body.split_whitespace()
+            .skip(1)
+            .find_map(|t| t.strip_prefix(p).and_then(|v| v.parse::<f64>().ok()))
+    };
+    match code {
+        "M203" => Some(Setting::MaxFeedrate {
+            x: param('X')?,
+            y: param('Y')?,
+        }),
+        "M204" => param('P').or_else(|| param('S')).map(Setting::Accel),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_m115_capabilities() {
+        assert_eq!(
+            parse_cap("Cap:AUTOREPORT_POS:1"),
+            Some(("AUTOREPORT_POS".into(), true))
+        );
+        assert_eq!(
+            parse_cap("Cap:PROGRESS:0"),
+            Some(("PROGRESS".into(), false))
+        );
+        assert_eq!(parse_cap("ok"), None);
+    }
+
+    #[test]
+    fn parses_m115_geometry_report() {
+        let line = "area:{full:{min:{x:-5.00,y:0.00,z:0.00},max:{x:400.00,y:410.00,z:500.00}},\
+                    work:{min:{x:0.00,y:0.00,z:0.00},max:{x:400.00,y:400.00,z:500.00}}}";
+        let (min, max) = parse_area(line).expect("should parse");
+        assert_eq!(min, [-5.0, 0.0, 0.0]);
+        assert_eq!(max, [400.0, 410.0, 500.0]);
+        assert!(parse_area("area:{full:{min:{x:1}}}").is_none());
+        assert!(parse_area("ok").is_none());
+    }
+
+    #[test]
+    fn parses_m503_motion_settings() {
+        assert_eq!(
+            parse_setting("echo:  M203 X300.00 Y250.00 Z5.00 E25.00"),
+            Some(Setting::MaxFeedrate { x: 300.0, y: 250.0 })
+        );
+        assert_eq!(
+            parse_setting("echo:  M204 P1500.00 R3000.00 T3000.00"),
+            Some(Setting::Accel(1500.0))
+        );
+        assert_eq!(
+            parse_setting("echo: M204 S800 T1000"),
+            Some(Setting::Accel(800.0))
+        );
+        assert_eq!(parse_setting("echo:  M92 X80.00 Y80.00"), None);
+        assert_eq!(parse_setting("echo:; Max feedrates (units/s):"), None);
+    }
 
     #[test]
     fn parses_inline_ok_temps() {

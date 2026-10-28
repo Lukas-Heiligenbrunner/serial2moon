@@ -371,17 +371,22 @@ async fn run_connection(
     let _ = write.write_all(b"\n").await;
     let _ = write.flush().await;
 
-    // Initialize the printer for this connection: reset line numbering, identify, enable
-    // temp autoreport, and discover steel-sheet profiles (the reader parses the M850
-    // reports into state). Done before reporting ready so the sheet macros are present
-    // when Mainsail reads the config. Numbering starts at 0; M110 N0 resets the printer
-    // to match, so the first framed command after it is N1. If the reset doesn't get
-    // through cleanly, send_and_wait realigns to the printer's counter on the first Resend.
+    // Initialize the printer for this connection: reset line numbering, identify, read its
+    // motion settings, enable temp autoreport, and (Prusa only) discover steel-sheet
+    // profiles (the reader parses the M850 reports into state). Done before reporting ready
+    // so the limits and sheet macros are present when Mainsail reads the config. Numbering
+    // starts at 0; M110 N0 resets the printer to match, so the first framed command after
+    // it is N1. If the reset doesn't get through cleanly, send_and_wait realigns to the
+    // printer's counter on the first Resend.
+    state.update(|s| s.caps.clear()); // re-read: the firmware may have been reflashed
     let _ = send!("M110 N0");
     let _ = send!("M115");
+    let _ = send!("M503");
     let _ = send!("M155 S1");
-    for id in 0..8 {
-        let _ = send!(&format!("M850 S{id}"));
+    if state.snapshot().is_prusa() {
+        for id in 0..8 {
+            let _ = send!(&format!("M850 S{id}"));
+        }
     }
     state.update(|s| {
         s.klippy_state = KlippyState::Ready;
@@ -563,6 +568,25 @@ async fn reader<R: AsyncReadExt + Unpin>(
                         }
                     });
                 }
+                // Extended M115 capabilities (`Cap:NAME:0|1`).
+                if let Some((name, enabled)) = parser::parse_cap(&raw) {
+                    state.update(move |s| {
+                        s.caps.insert(name, enabled);
+                    });
+                }
+                // Limits from the printer itself (M115 geometry, M503) replace the CLI
+                // defaults so the frontend's bounds match the machine.
+                if let Some((min, max)) = parser::parse_area(&raw) {
+                    debug!(?min, ?max, "printer travel limits");
+                    state.update(move |s| s.apply_area(min, max));
+                }
+                match parser::parse_setting(&raw) {
+                    Some(parser::Setting::MaxFeedrate { x, y }) => {
+                        state.update(move |s| s.apply_max_feedrate(x, y));
+                    }
+                    Some(parser::Setting::Accel(a)) => state.update(move |s| s.apply_accel(a)),
+                    None => {}
+                }
                 // Discover steel-sheet profiles from M850 reports (upsert by id); show the
                 // active one in the status line (Mainsail can't highlight a macro button).
                 if let Some((id, label, z, active)) = parser::parse_sheet(&raw) {
@@ -652,7 +676,13 @@ async fn reader<R: AsyncReadExt + Unpin>(
                         let _ = ack_tx.send(AckEvent::Error).await;
                     }
                     Line::Echo(msg) => {
-                        let _ = console.send(format!("// {msg}"));
+                        // The connect-time M503 report (and other replies to the bridge's own
+                        // init commands) is parsed above; don't flood the console with it.
+                        if state.snapshot().klippy_state == KlippyState::Startup {
+                            debug!(line = %msg, "printer output during init (suppressed)");
+                        } else {
+                            let _ = console.send(format!("// {msg}"));
+                        }
                     }
                     Line::Start => {
                         warn!("printer reset (start banner) detected");
@@ -666,8 +696,13 @@ async fn reader<R: AsyncReadExt + Unpin>(
                     }
                     Line::Other(msg) => {
                         // Suppress M115 capability/firmware noise from the console (it's
-                        // parsed above and condensed into one "// connected" line).
-                        if msg.starts_with("Cap:") || msg.contains("FIRMWARE_NAME:") {
+                        // parsed above and condensed into one "// connected" line), and the
+                        // rest of the replies to the bridge's own init commands (M115
+                        // geometry report, M503).
+                        if msg.starts_with("Cap:")
+                            || msg.contains("FIRMWARE_NAME:")
+                            || state.snapshot().klippy_state == KlippyState::Startup
+                        {
                             debug!(line = %msg, "printer output (suppressed)");
                         } else {
                             let _ = console.send(msg);

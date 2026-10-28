@@ -16,7 +16,8 @@ mod transport;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches};
 use tokio::sync::broadcast;
 use tracing::info;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -119,7 +120,20 @@ async fn main() -> Result<()> {
         seed_default_config(&path);
         let _ = dotenvy::from_path(std::path::Path::new(&path));
     }
-    let config = Config::parse();
+    let matches = Config::command().get_matches();
+    let config = Config::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    // Limits the user set (flag, env or config file) win over what the printer reports.
+    let user_set = |id: &str| {
+        !matches!(
+            matches.value_source(id),
+            Some(ValueSource::DefaultValue) | None
+        )
+    };
+    let pinned_limits = state::PinnedLimits {
+        area: user_set("bed_size"),
+        velocity: user_set("max_velocity"),
+        accel: user_set("max_accel"),
+    };
     let _log_guard = init_logging(&config);
     info!(transport = ?config.transport, socket = %config.uds_path.display(), "starting serial2moon");
 
@@ -133,7 +147,7 @@ async fn main() -> Result<()> {
     info!(gcode_dir = %gcode_abs.display(), "serving G-code files from this directory (must match Moonraker's gcodes path)");
 
     // State actor.
-    let state = StateHandle::spawn(PrinterState::new(
+    let mut printer = PrinterState::new(
         config.axis_maximum(),
         config.max_velocity,
         config.max_accel,
@@ -142,7 +156,9 @@ async fn main() -> Result<()> {
         config.gcode_dir.to_string_lossy().to_string(),
         config.parsed_sheets(),
         config.host_control_dir.is_some(),
-    ));
+    );
+    printer.pinned_limits = pinned_limits;
+    let state = StateHandle::spawn(printer);
     state::sysstats::spawn(state.clone());
 
     // Console (Marlin echo/error) fan-out.
