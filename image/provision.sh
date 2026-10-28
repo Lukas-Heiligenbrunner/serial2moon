@@ -44,6 +44,7 @@ cp "$SRC/image/files/etc/udev/rules.d/99-serial2moon-latency.rules" /etc/udev/ru
 install -d /opt/serial2moon
 cp -r "$SRC/image/files/opt/serial2moon/." /opt/serial2moon/
 cp -r "$SRC/docker" /opt/serial2moon/docker
+cp "$SRC/README.md" "$SRC/.env.example" /opt/serial2moon/  # served by Moonraker (see compose.yml)
 chmod +x /opt/serial2moon/start.sh
 
 # serial2moon's settings file is created automatically in Moonraker's config dir on first

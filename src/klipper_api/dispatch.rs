@@ -130,12 +130,20 @@ fn info(app: &App) -> Value {
         "state": s.klippy_state.as_str(),
         "state_message": s.state_message,
         "hostname": hostname(),
-        "klipper_path": "/opt/serial2moon",
+        "klipper_path": app.config.klipper_path,
         "python_path": "/usr/bin/python3",
         "process_id": std::process::id(),
         "cpu_info": "serial2moon bridge",
         "log_file": "/dev/null",
-        "config_file": app.config.gcode_dir.display().to_string(),
+        // Moonraker expects Klipper's config file inside its `config` folder; serial2moon's
+        // own settings file lives there. (The G-code dir is only a fallback.)
+        "config_file": app
+            .config
+            .config_file
+            .as_ref()
+            .unwrap_or(&app.config.gcode_dir)
+            .display()
+            .to_string(),
         "software_version": concat!("serial2moon v", env!("CARGO_PKG_VERSION")),
     })
 }

@@ -119,6 +119,8 @@ editable `serial2moon.conf` shown next to `moonraker.conf` in Mainsail.
 | `--uds-path` / `S2M_UDS` | `/tmp/klippy_uds` | socket Moonraker connects to |
 | `--gcode-dir` / `S2M_GCODE_DIR` | `./gcodes` | gcode files (must match Moonraker) |
 | `--bed-size` / `S2M_BED_SIZE` | `220,220,250` | advertised X,Y,Z limits |
+| `--config-file` / `S2M_CONFIG_FILE` | — | editable settings file; reported to Moonraker as the config file |
+| `--klipper-path` / `S2M_KLIPPER_PATH` | `/opt/serial2moon` | path Moonraker serves `config/` and `docs/` from |
 | `--extruder-max-temp` / `S2M_EXTRUDER_MAX_TEMP` | `300` | bounds the UI temp input |
 | `--bed-max-temp` / `S2M_BED_MAX_TEMP` | `120` | bounds the UI temp input |
 | `--pause-lift` / `S2M_PAUSE_LIFT` | `5` | Z lift (mm) on pause/cancel (Prusa: passed to `M601`) |

@@ -60,6 +60,10 @@ services:
       - logs:/opt/printer_data/logs
       - config:/opt/printer_data/config
       - ./docker/moonraker.conf:/opt/printer_data/config/moonraker.conf:ro
+      # serial2moon reports klipper_path=/opt/serial2moon; Moonraker serves its config/ and
+      # docs/ as read-only roots (config_examples, docs) and warns when they're missing.
+      - ./README.md:/opt/serial2moon/docs/README.md:ro
+      - ./.env.example:/opt/serial2moon/config/serial2moon.conf.example:ro
     ports:
       - "7125:7125"
     restart: unless-stopped

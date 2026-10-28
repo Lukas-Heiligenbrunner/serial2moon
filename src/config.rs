@@ -38,6 +38,17 @@ pub struct Config {
     #[arg(long, env = "S2M_BAUD")]
     pub baud: Option<u32>,
 
+    /// serial2moon's editable settings file, reported to Moonraker as Klipper's config
+    /// file. Put it in Moonraker's `config` folder (Moonraker warns otherwise).
+    #[arg(long, env = "S2M_CONFIG_FILE")]
+    pub config_file: Option<PathBuf>,
+
+    /// Reported to Moonraker as the Klipper source dir. Moonraker serves its `config`
+    /// and `docs` subfolders (as seen from Moonraker's filesystem) as read-only roots and
+    /// warns if they are missing; the compose files mount serial2moon's there.
+    #[arg(long, env = "S2M_KLIPPER_PATH", default_value = "/opt/serial2moon")]
+    pub klipper_path: String,
+
     /// Max X/Y/Z travel (mm), advertised to the frontend as axis limits.
     #[arg(long, env = "S2M_BED_SIZE", default_value = "220,220,250")]
     pub bed_size: String,
