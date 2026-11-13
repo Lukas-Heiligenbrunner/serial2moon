@@ -128,6 +128,7 @@ fn info(app: &App) -> Value {
     let s = app.state.snapshot();
     json!({
         "state": s.klippy_state.as_str(),
+        "app": s.app_name(),
         "state_message": s.state_message,
         "hostname": hostname(),
         "klipper_path": "/opt/serial2moon",

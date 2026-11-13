@@ -222,6 +222,15 @@ impl PrinterState {
         self.mcu_version.starts_with("Prusa-Firmware")
     }
 
+    /// Firmware name for `printer.info`'s `app` field (as Kalico reports "Kalico"): the first word
+    /// of the M115 `FIRMWARE_NAME` ("Marlin", "Prusa-Firmware"), or "Marlin" until M115 is read.
+    pub fn app_name(&self) -> &str {
+        match self.mcu_version.split_whitespace().next() {
+            Some(w) if self.mcu_version != "unknown" => w,
+            _ => "Marlin",
+        }
+    }
+
     pub fn reset_print_stats(&mut self) {
         self.print_state = PrintState::Standby;
         self.print_filename.clear();
@@ -524,6 +533,16 @@ mod tests {
             vec![],
             false,
         )
+    }
+
+    #[test]
+    fn app_name_is_first_word_of_firmware_name() {
+        let mut s = state();
+        assert_eq!(s.app_name(), "Marlin");
+        s.mcu_version = "Prusa-Firmware 3.13.2 based on Marlin".into();
+        assert_eq!(s.app_name(), "Prusa-Firmware");
+        s.mcu_version = "Marlin 2.1.3".into();
+        assert_eq!(s.app_name(), "Marlin");
     }
 
     #[test]
