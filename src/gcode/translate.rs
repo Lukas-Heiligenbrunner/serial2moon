@@ -62,6 +62,11 @@ async fn execute_line(app: &App, line: &str) -> Result<()> {
         // ---- Console help ----
         "HELP" => help(app),
 
+        // ---- Console message, like Klipper's [respond] module ----
+        "RESPOND" => {
+            let _ = app.console.send(respond_line(line));
+        }
+
         // ---- Steel-sheet profiles (Prusa M850) ----
         name if name.starts_with("SHEET_") => select_sheet(app, name).await?,
 
@@ -118,7 +123,6 @@ const NOOP_COMMANDS: &[&str] = &[
     "Z_TILT_ADJUST",
     "QUAD_GANTRY_LEVEL",
     "SAVE_CONFIG",
-    "RESPOND",
     "STATUS",
     "CLEAR_PAUSE",
     "SET_DISPLAY_GROUP",
@@ -228,6 +232,24 @@ async fn select_sheet(app: &App, macro_name: &str) -> Result<()> {
         }
         None => bail!("unknown steel sheet '{macro_name}'"),
     }
+}
+
+/// Format a Klipper `RESPOND [TYPE=echo|command|error] [PREFIX=..] MSG=..` as a console
+/// line, e.g. `RESPOND MSG="hi"` -> `echo: hi`, `RESPOND TYPE=error MSG="no"` -> `!! no`.
+fn respond_line(line: &str) -> String {
+    let msg = param_str(line, "MSG").unwrap_or_default();
+    let prefix = param_str(line, "PREFIX").unwrap_or_else(|| {
+        match param_str(line, "TYPE")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "error" => "!!".into(),
+            "command" => "//".into(),
+            _ => "echo:".into(),
+        }
+    });
+    format!("{prefix} {msg}")
 }
 
 /// Request a host power action by dropping a marker file (`reboot`/`shutdown`) into the
@@ -446,6 +468,20 @@ mod tests {
             !m.contains_key("SET_PRESSURE_ADVANCE"),
             "no-op commands stay unlisted"
         );
+    }
+
+    #[test]
+    fn formats_respond_like_klipper() {
+        assert_eq!(
+            respond_line(r#"RESPOND MSG="Update done""#),
+            "echo: Update done"
+        );
+        assert_eq!(
+            respond_line(r#"RESPOND TYPE=error MSG="No network""#),
+            "!! No network"
+        );
+        assert_eq!(respond_line("RESPOND TYPE=command MSG=hi"), "// hi");
+        assert_eq!(respond_line(r#"RESPOND PREFIX=s2m: MSG="x y""#), "s2m: x y");
     }
 
     #[test]
