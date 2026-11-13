@@ -113,8 +113,9 @@ editable `serial2moon.conf` shown next to `moonraker.conf` in Mainsail.
 
 | Flag / env | Default | Meaning |
 |---|---|---|
-| `--transport` / `S2M_TRANSPORT` | `mock` | `mock` or `serial` |
+| `--transport` / `S2M_TRANSPORT` | `mock` | `mock`, `serial` or `tcp` |
 | `--serial-port` / `S2M_SERIAL_PORT` | autodetect | serial device (serial mode) |
+| `--tcp-addr` / `S2M_TCP_ADDR` | `127.0.0.1:8099` | `host:port` of a raw G-code socket (tcp mode) |
 | `--baud` / `S2M_BAUD` | autodetect | serial baud (probes + gates on `M115`) |
 | `--uds-path` / `S2M_UDS` | `/tmp/klippy_uds` | socket Moonraker connects to |
 | `--gcode-dir` / `S2M_GCODE_DIR` | `./gcodes` | gcode files (must match Moonraker) |
@@ -146,6 +147,20 @@ editable `serial2moon.conf` shown next to `moonraker.conf` in Mainsail.
 cargo test       # unit tests + a real-PTY serial integration test
 cargo clippy
 cargo fmt
+```
+
+The PTY test uses Linux-only `nix` calls, so on macOS run the suite in a container:
+
+```bash
+docker run --rm -v "$PWD":/src -w /src -v s2m-cargo:/usr/local/cargo/registry \
+  -v s2m-target:/src/target rust:1-slim-bookworm cargo test
+```
+
+**Against the Marlin simulator:** run [MarlinSimUI](https://github.com/MarlinFirmware/MarlinSimUI)'s
+`MarlinSimulator` on the host (raw G-code socket on TCP 8099), then:
+
+```bash
+docker compose -f compose.yml -f compose.sim.yml up -d --build   # Mainsail on :8088
 ```
 
 Layout: `src/state` is the single source of truth (one actor task, `watch` snapshots).

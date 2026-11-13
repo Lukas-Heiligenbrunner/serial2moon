@@ -10,6 +10,8 @@ pub enum TransportKind {
     Mock,
     /// Real USB serial device.
     Serial,
+    /// Raw G-code over a TCP socket (Marlin simulator, ESP3D/telnet serial bridges).
+    Tcp,
 }
 
 /// serial2moon — bridge a legacy Marlin G-code printer to Moonraker by
@@ -34,9 +36,15 @@ pub struct Config {
     #[arg(long, env = "S2M_SERIAL_PORT")]
     pub serial_port: Option<String>,
 
-    /// Serial baud rate. Omit to autodetect via M115.
+    /// Serial baud rate. Omit to autodetect via M115. With --transport tcp this is only
+    /// used to compute link utilization (omit for "no limit").
     #[arg(long, env = "S2M_BAUD")]
     pub baud: Option<u32>,
+
+    /// TCP endpoint (`host:port`) for --transport tcp, e.g. the Marlin simulator's raw
+    /// G-code socket (`host.docker.internal:8099` from a container).
+    #[arg(long, env = "S2M_TCP_ADDR", default_value = "127.0.0.1:8099")]
+    pub tcp_addr: String,
 
     /// Max X/Y/Z travel (mm), advertised to the frontend as axis limits.
     #[arg(long, env = "S2M_BED_SIZE", default_value = "220,220,250")]

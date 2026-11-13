@@ -1,0 +1,19 @@
+# Dev overlay: drive the Marlin simulator (MarlinSimUI) instead of the mock printer.
+#
+#   1. Run MarlinSimulator on the host (its raw G-code socket listens on TCP 8099,
+#      or MARLIN_SIM_SERIAL_PORT / --serial-port).
+#   2. docker compose -f compose.yml -f compose.sim.yml up -d --build
+#   3. Open http://localhost:8088
+#
+# The container reaches the host via host.docker.internal (built into Docker Desktop;
+# the extra_hosts line makes it work on Linux Docker Engine too).
+
+services:
+  serial2moon:
+    command:
+      - "--transport=tcp"
+      - "--tcp-addr=${S2M_TCP_ADDR:-host.docker.internal:8099}"
+      - "--uds-path=/opt/printer_data/run/klippy.sock"
+      - "--gcode-dir=/opt/printer_data/gcodes"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

@@ -4,6 +4,7 @@
 
 pub mod mock;
 pub mod serial;
+pub mod tcp;
 
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -26,5 +27,6 @@ pub async fn open(config: &Config) -> Result<(Box<dyn Serial>, u32)> {
             Ok((mock::open(options), 0))
         }
         TransportKind::Serial => serial::open(config).await,
+        TransportKind::Tcp => tcp::open(config).await,
     }
 }

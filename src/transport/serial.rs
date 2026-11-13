@@ -99,7 +99,9 @@ async fn connect(port: &str, baud: u32) -> Result<(Box<dyn Serial>, u32)> {
 /// Re-send M115 periodically for up to [`HANDSHAKE_WINDOW`], scanning the stream for a
 /// Marlin `FIRMWARE_NAME:` reply. Tolerant of the boot-time reset and of continuous
 /// chatter/garbage (bounded by an overall deadline rather than per-line timeouts).
-async fn handshake<S: AsyncReadExt + AsyncWriteExt + Unpin>(stream: &mut S) -> Result<bool> {
+pub(super) async fn handshake<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+    stream: &mut S,
+) -> Result<bool> {
     let start = Instant::now();
     let mut last_send: Option<Instant> = None;
     let mut acc = String::new();
