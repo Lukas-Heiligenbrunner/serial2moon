@@ -31,8 +31,11 @@ jobs:
           docker pull --platform linux/arm64 mkuf/moonraker:latest
           # Mainsail: the `v2` tag the stack's compose.yml uses (`latest` is the 8080 variant).
           docker pull --platform linux/arm64 ghcr.io/mainsail-crew/mainsail:v2
-          docker save mkuf/moonraker:latest        -o image/files/opt/serial2moon/images/moonraker.tar
-          docker save ghcr.io/mainsail-crew/mainsail:v2 -o image/files/opt/serial2moon/images/mainsail.tar
+          # --platform is required with the containerd image store (Docker 29 default): only
+          # the arm64 variant was pulled, so saving the full multi-arch index fails on the
+          # missing amd64 manifest ("unable to create manifests file: ... not found").
+          docker save --platform linux/arm64 mkuf/moonraker:latest        -o image/files/opt/serial2moon/images/moonraker.tar
+          docker save --platform linux/arm64 ghcr.io/mainsail-crew/mainsail:v2 -o image/files/opt/serial2moon/images/mainsail.tar
 
       - name: Bake Raspberry Pi OS image
         id: build
