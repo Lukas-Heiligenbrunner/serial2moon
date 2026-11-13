@@ -12,7 +12,10 @@ permissions:
 
 jobs:
   build-image:
-    runs-on: ubuntu-latest
+    # Pinned: arm-runner-action@v2 installs `qemu-user-static`, which is only a virtual
+    # package on Ubuntu 26.04 (ubuntu-latest) and fails to install. Upstream fixed this on
+    # master (5439f41) but hasn't tagged it yet; move back to ubuntu-latest once v2 has it.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
